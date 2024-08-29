@@ -17,13 +17,10 @@
 
           modules = [{
             languages.zig.enable = true;
-            # packages = with pkgs; [
-            #
-            # ];
+            # packages = with pkgs; [];
           }];
 				};
 			}
 		);
 }
 # vim: sw=2 ts=2
-
