@@ -38,6 +38,20 @@ pub const char = struct {
     pub fn whitespace(str: []const u8) ?usize {
         return std.mem.indexOfNone(u8, str, &std.ascii.whitespace);
     }
+
+    pub fn alphabetic(str: []const u8) ?usize {
+        if (str.len > 0) switch (str[0]) {
+            'a'...'z', 'A'...'Z' => return 1,
+            else => return null,
+        } else return null;
+    }
+
+    pub fn alphaNumeric(str: []const u8) ?usize {
+        if (str.len > 0) switch (str[0]) {
+            '0'...'9', 'a'...'z', 'A'...'Z' => return 1,
+            else => return null,
+        } else return null;
+    }
 };
 
 pub fn isLower(ch: u21) bool {

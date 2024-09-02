@@ -1,6 +1,8 @@
 const std = @import("std");
 const util = @import("util.zig");
 const tk = @import("token.zig");
+const kw = @import("keyword.zig");
+const op = @import("operator.zig");
 
 const Token = tk.Token;
 const ch = util.char;
@@ -11,6 +13,7 @@ pub const Lexer = struct {
     idx: u32 = 0,
     token_start: u32 = 0,
     source: []const u8,
+    first_on_line: bool = true, // TODO: for macros
     idx_stack: std.ArrayList(u32),
 
     /// Deinitialize with `deinit`.
@@ -25,129 +28,142 @@ pub const Lexer = struct {
         self.idx_stack.deinit();
     }
 
-    fn tokenStr(self: Self) []const u8 {
-        return self.source[self.token_start..self.idx];
-    }
-
-    fn pushIdx(self: *Self) void {
-        self.idx_stack.append(self.idx) catch @panic("lexer allocator out of memory");
-    }
-
-    fn popIdx(self: *Self) void {
-        if (self.idx_stack.popOrNull() == null) @panic("popIdx(): Forgot to pushIdx()");
-    }
-
-    const MatchFn = fn ([]const u8) ?usize;
-
-    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
-    /// input string starts with the sequence of chars described by it. If yes, it
-    /// advances the head pointer.
-    fn match(self: *Self, what: anytype) bool {
-        if (self.idx >= self.source.len) return false;
-        const T = @TypeOf(what);
-
-        if (comptime util.isConvertibleTo(T, u8)) {
-            if (self.source[self.idx] == what) {
-                self.idx += 1;
-                return true;
-            }
-        } else if (comptime util.isConvertibleTo(T, []const u8)) {
-            if (std.mem.startsWith(u8, self.source[self.idx..], what)) {
-                self.idx += @intCast(what.len);
-                return true;
-            }
-        } else if (T == MatchFn) {
-            if (what(self.source[self.idx..])) |len| {
-                self.idx += @intCast(len);
-                return true;
-            }
-        } else {
-            @compileError("unexpected type '" ++ @typeName(@TypeOf(what)) ++
-                "', match() only accepts values of type: 'u8', '[]const u8'," ++
-                " and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
-        }
-        return false;
-    }
-
-    // TODO: This is now mostly wrong
-    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
-    /// input string starts with the sequence of chars described by it. It can also
-    /// accept a plain `bool` representing a successful match in case your function can't
-    /// conform to the `MatchFn` interface.
-    /// If there is no match, it rolls back the head index to the previous 'match frame',
-    /// same as `self.popIdx()`. A new match frame may be started by using
-    /// `self.pushIdx()` and must be ended on all possible code paths. This means that
-    /// if you have `if`s in your code, you may still need to call `self.popIdx()` explicitly.
-    /// ```zig
-    /// fn matchHello(self: *Self) bool {
-    ///     self.pushIdx();
-    ///     return self.expect(self.match('H') or self.match('h')) and self.expect("ello");
-    /// }
-    /// ```
-    fn expect(self: *Self, what: anytype) if (@typeInfo(@TypeOf(what)) != .Optional) bool else @TypeOf(what) {
-        const Type = @TypeOf(what);
-        const stack = self.idx_stack.items;
-
-        if (Type == bool) {
-            if (what == false) self.idx = stack[stack.len - 1];
-            return what;
-        } else if (@typeInfo(Type) == .Optional) {
-            if (what == null) self.idx = stack[stack.len - 1];
-            return what;
-        } else if (util.isConvertibleTo(Type, u8) or util.isConvertibleTo(Type, []const u8) or Type == MatchFn) {
-            const ok = self.match(what);
-            if (ok == false) self.idx = stack[stack.len - 1];
-            return ok;
-        } else {
-            @compileError("unexpected type '" ++ @typeName(Type) ++
-                "', expect() only accepts values of type: 'bool', 'u8', " ++
-                "'[]const u8', and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
-        }
-    }
-
-    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
-    /// input string starts with the sequence of chars described by it.
-    ///
-    /// See also: [Lexer.pushIdx()](src/lexer.zig), [Lexer.popIdx()](src/lexer.zig)
-    fn peek(self: *Self, what: anytype) bool {
-        if (self.idx >= self.source.len) return false;
-        const T = @TypeOf(what);
-
-        if (comptime util.isConvertibleTo(T, u8)) {
-            return self.source[self.idx] == what;
-        } else if (comptime util.isConvertibleTo(T, []const u8)) {
-            return std.mem.startsWith(u8, self.source[self.idx..], what);
-        } else if (comptime util.isConvertibleTo(T, MatchFn)) {
-            return what(self.source[self.idx..]) != null;
-        } else {
-            @compileError("unexpected type '" ++ @typeName(@TypeOf(what)) ++
-                "', peek() only accepts values of type: 'u8', '[]const u8'," ++
-                " and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
-        }
-    }
-
-    /// This has no practical function, it is here just to be sprinkled through the code
-    /// to make it more readable by signaling intent rather than ignoring a random value.
-    /// ```zig
-    ///     optional(self.literalDigitSequence(ch.hex));
-    /// ```
-    ///
-    /// See also: [Lexer.expect()](src/lexer.zig)
-    fn optional(ok: anytype) void {
-        _ = ok;
-    }
-
     pub fn next(self: *Self) !?Token {
         optional(self.match(ch.whitespace));
         self.token_start = self.idx;
-        return try self.literalNumeric();
+
+        // NOTE: The order matters
+        const token =
+            self.literalBool() orelse
+            self.keyword() orelse
+            self.identifier() orelse
+            self.preproc() orelse
+            try self.comment() orelse
+            try self.literalStr() orelse
+            try self.literalChar() orelse
+            self.operator() orelse
+            try self.literalNumeric();
+
+        if (token == null) {
+            const source = self.source[self.idx..];
+            const no_more_chars = std.mem.indexOfNone(u8, source, &std.ascii.whitespace) == null;
+            return if (no_more_chars) token else error.InvalidToken;
+        }
+        return token;
+    }
+
+    fn literalBool(self: *Self) ?Token {
+        if (self.match("true")) {
+            return Token{ .literal_bool = true };
+        }
+        if (self.match("false")) {
+            return Token{ .literal_bool = false };
+        }
+        return null;
+    }
+
+    fn identifier(self: *Self) ?Token {
+        if (self.match('_') or self.match(ch.alphabetic)) {
+            while (self.match('_') or self.match(ch.alphaNumeric)) {}
+            return Token{ .identifier = self.tokenStr() };
+        }
+        return null;
+    }
+
+    fn comment(self: *Self) !?Token {
+        if (self.match("//")) {
+            const source = self.source[self.idx..];
+            const len = std.mem.indexOfAny(u8, source, "\r\n") orelse source.len;
+            self.idx += @intCast(len);
+            return Token{ .comment = self.tokenStr() };
+        }
+        if (self.match("/*")) {
+            const source = self.source[self.idx..];
+            const len = std.mem.indexOf(u8, source, "*/") orelse return error.UnmatchedBlockComment;
+            self.idx += @intCast(len + 2);
+            return Token{ .comment = self.tokenStr() };
+        }
+        return null;
+    }
+
+    fn keyword(self: *Self) ?Token {
+        const source = self.source[self.idx..];
+        const res = kw.parseKeyword(source) orelse return null;
+        self.idx += res.len;
+        return Token{ .keyword = res.kw };
+    }
+
+    fn operator(self: *Self) ?Token {
+        const source = self.source[self.idx..];
+        const res = op.parseOperator(source) orelse return null;
+        self.idx += res.len;
+        return Token{ .operator = res.op };
+    }
+
+    // TODO:
+    fn preproc(self: *Self) ?Token {
+        self.pushIdx();
+        defer self.popIdx();
+
+        if (self.first_on_line and self.match('#')) {
+            optional(self.match(ch.whitespace));
+
+            if (self.match("include")) {
+                return Token{ .preproc = .include };
+            } else if (self.match("pragma")) {
+                return Token{ .preproc = .pragma };
+            } else if (self.match("define")) {
+                return Token{ .preproc = .define };
+            } else if (self.match("undef")) {
+                return Token{ .preproc = .undef };
+            } else if (self.match("ifndef")) {
+                return Token{ .preproc = .ifndef };
+            } else if (self.match("ifdef")) {
+                return Token{ .preproc = .ifdef };
+            } else if (self.match("if")) {
+                return Token{ .preproc = .if_ };
+            } else if (self.match("else")) {
+                return Token{ .preproc = .else_ };
+            } else if (self.match("elif")) {
+                return Token{ .preproc = .elif };
+            } else if (self.match("elifdef")) {
+                return Token{ .preproc = .elifdef };
+            } else if (self.match("elifndef")) {
+                return Token{ .preproc = .elifndef };
+            } else if (self.expect("endif")) {
+                return Token{ .preproc = .endif };
+            }
+        }
+        return null;
+    }
+
+    // TODO:
+    fn literalStr(self: *Self) !?Token {
+        if (self.match('"')) {
+            const source = self.source[self.idx..];
+            const len = std.mem.indexOfScalar(u8, source, '"') orelse return error.UnmatchedDoubleQuote;
+            self.idx += @intCast(len + 1);
+            return Token{ .literal_str = self.tokenStr() };
+        }
+        return null;
+    }
+
+    // TODO:
+    fn literalChar(self: *Self) !?Token {
+        if (self.match("'")) {
+            const source = self.source[self.idx..];
+            const len = std.mem.indexOfScalar(u8, source, '\'') orelse return error.UnmatchedQuote;
+            self.idx += @intCast(len + 1);
+            return Token{ .literal_str = self.tokenStr() };
+        }
+        return null;
     }
 
     fn literalNumeric(self: *Self) !?Token {
         self.pushIdx();
         defer self.popIdx();
 
-        // NOTE: The order matters here
+        // NOTE: The order matters
         if (try self.literalFloat(.dec)) |token| {
             return token;
         }
@@ -203,7 +219,7 @@ pub const Lexer = struct {
     }
 
     fn literalIntSuffixWidth(self: *Self) ?u8 {
-        // NOTE: The order matters here because `match()` will take the shortest slice that matches
+        // NOTE: The order matters
         if (self.match("ll") or self.match("LL")) {
             return 64;
         } else if (self.match('z') or self.match('Z')) {
@@ -280,19 +296,133 @@ pub const Lexer = struct {
     }
 
     fn literalDigitSequence(self: *Self, digitFn: MatchFn) bool {
-        if (!self.match(digitFn)) return false;
-        var ends_digit = true;
+        self.pushIdx();
+        defer self.popIdx();
 
-        while (true) {
+        if (self.match(digitFn)) while (true) {
             if (self.match(digitFn)) {
-                ends_digit = true;
+                continue;
             } else if (self.match("'")) {
                 while (self.match("'")) {}
+                if (!self.expect(digitFn)) return false;
+            } else {
+                return true;
+            }
+        };
+        return false;
+    }
 
-                if (!self.match(digitFn)) return false;
-                ends_digit = false;
-            } else return ends_digit;
+    fn tokenStr(self: Self) []const u8 {
+        return self.source[self.token_start..self.idx];
+    }
+
+    fn pushIdx(self: *Self) void {
+        self.idx_stack.append(self.idx) catch @panic("lexer allocator out of memory");
+    }
+
+    fn popIdx(self: *Self) void {
+        if (self.idx_stack.popOrNull() == null) @panic("popIdx(): Forgot to pushIdx()");
+    }
+
+    const MatchFn = fn ([]const u8) ?usize;
+
+    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
+    /// input string starts with the sequence of chars described by it. If yes, it
+    /// advances the head pointer.
+    fn match(self: *Self, what: anytype) bool {
+        if (self.idx >= self.source.len) return false;
+        const Type = @TypeOf(what);
+
+        if (comptime util.isConvertibleTo(Type, u8)) {
+            if (self.source[self.idx] == what) {
+                self.idx += 1;
+                return true;
+            }
+        } else if (comptime util.isConvertibleTo(Type, []const u8)) {
+            if (std.mem.startsWith(u8, self.source[self.idx..], what)) {
+                self.idx += @intCast(what.len);
+                return true;
+            }
+        } else if (Type == MatchFn) {
+            if (what(self.source[self.idx..])) |len| {
+                self.idx += @intCast(len);
+                return true;
+            }
+        } else {
+            @compileError("unexpected type '" ++ @typeName(@TypeOf(what)) ++
+                "', match() only accepts values of type: 'u8', '[]const u8'," ++
+                " and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
         }
+        return false;
+    }
+
+    // TODO: This is now mostly wrong
+    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
+    /// input string starts with the sequence of chars described by it. It can also
+    /// accept a plain `bool` representing a successful match in case your function can't
+    /// conform to the `MatchFn` interface.
+    /// If there is no match, it rolls back the head index to the previous 'match frame',
+    /// same as `self.popIdx()`. A new match frame may be started by using
+    /// `self.pushIdx()` and must be ended on all possible code paths. This means that
+    /// if you have `if`s in your code, you may still need to call `self.popIdx()` explicitly.
+    /// ```zig
+    /// fn matchHello(self: *Self) bool {
+    ///     self.pushIdx();
+    ///     return self.expect(self.match('H') or self.match('h')) and self.expect("ello");
+    /// }
+    /// ```
+    fn expect(self: *Self, what: anytype) if (@typeInfo(@TypeOf(what)) != .Optional) bool else @TypeOf(what) {
+        const Type = @TypeOf(what);
+        const stack = self.idx_stack.items;
+
+        if (Type == bool) {
+            if (what == false) self.idx = stack[stack.len - 1];
+            return what;
+        } else if (@typeInfo(Type) == .Optional) {
+            if (what == null) self.idx = stack[stack.len - 1];
+            return what;
+        } else if (comptime Type == MatchFn or
+            util.isConvertibleTo(Type, u8) or
+            util.isConvertibleTo(Type, []const u8))
+        {
+            const ok = self.match(what);
+            if (ok == false) self.idx = stack[stack.len - 1];
+            return ok;
+        } else @compileError("unexpected type '" ++ @typeName(Type) ++
+            "', expect() only accepts values of type: 'bool', 'u8', " ++
+            "'[]const u8', and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
+    }
+
+    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
+    /// input string starts with the sequence of chars described by it.
+    ///
+    /// See also: [Lexer.pushIdx()](src/lexer.zig), [Lexer.popIdx()](src/lexer.zig)
+    fn peek(self: *Self, what: anytype) bool {
+        if (self.idx >= self.source.len) return false;
+        const T = @TypeOf(what);
+
+        if (comptime util.isConvertibleTo(T, u8)) {
+            return self.source[self.idx] == what;
+        } else if (comptime util.isConvertibleTo(T, []const u8)) {
+            return std.mem.startsWith(u8, self.source[self.idx..], what);
+        } else if (comptime util.isConvertibleTo(T, MatchFn)) {
+            return what(self.source[self.idx..]) != null;
+        } else {
+            @compileError("unexpected type '" ++ @typeName(@TypeOf(what)) ++
+                "', peek() only accepts values of type: 'u8', '[]const u8'," ++
+                " and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
+        }
+    }
+
+    /// This has no practical function, it is here just to be sprinkled through the code
+    /// to make it more readable by signaling intent rather than ignoring a random value.
+    /// ```zig
+    ///     optional(self.literalDigitSequence(ch.hex));
+    /// ```
+    ///
+    /// See also: [Lexer.expect()](src/lexer.zig)
+    fn optional(ok: anytype) void {
+        _ = ok;
     }
 };
 
