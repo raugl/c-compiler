@@ -283,7 +283,7 @@ pub const TokenIterator = struct {
                     return self.finishToken();
                 },
                 .literal_bool, .keyword, .operator => {},
-                else => {},
+                else => return error.NotImplementedYet,
             }
         }
 
@@ -437,7 +437,7 @@ pub const TokenIterator = struct {
             .new_token, .starts_digit, .starts_alphabetic => {
                 return error.IncompleteToken;
             },
-            else => return Token{ .comment = "unimplemented" },
+            else => return error.NotImplementedYet,
         }
     }
 };
