@@ -55,6 +55,9 @@ pub const ParseResult = struct {
     len: u32,
 };
 
+/// Accepts any string and parses a keyword from its beginning up to however long
+/// the potential keyword is. It returns the parsed length, so you don't need to
+/// specify the precise keyword length when calling it.
 pub fn parseKeyword(str: []const u8) ?ParseResult {
     const KeywordData = struct {
         str: []const u8,

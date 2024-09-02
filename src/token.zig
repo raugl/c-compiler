@@ -44,7 +44,7 @@ pub const Token = union(enum) {
         _ = .{ fmt, options };
 
         switch (self) {
-            .literal_str => |str| try writer.print("literal str: \"{s}\"", .{str}),
+            .literal_str => |str| try writer.print("literal str: {s}", .{str}),
             .literal_bool => |state| try writer.print("literal bool: {}", .{state}),
             .literal_float => |float| try writer.print(
                 "literal f{}: {}",
@@ -61,8 +61,8 @@ pub const Token = union(enum) {
             .comment => |body| try writer.print("comment: {s}", .{body}),
             .identifier => |name| try writer.print("identifier: \"{s}\"", .{name}),
             .preproc => |preproc| try writer.print("preproc.{s}", .{@tagName(preproc)}),
-            .keyword => |keyword| try writer.print("keyword.{s}", .{@tagName(keyword)}),
-            .operator => |operator| try writer.print("operator.{s}", .{@tagName(operator)}),
+            .keyword => |keyword| try writer.print("keyword.{s}", .{kw.format(keyword)}),
+            .operator => |operator| try writer.print("operator: \"{s}\"", .{op.format(operator)}),
         }
     }
 };
@@ -161,7 +161,6 @@ pub const TokenTag = enum {
     double_hash,
     double_minus,
     double_plus,
-    double_quote,
     ellipses,
     equal,
     exclamation,
@@ -182,7 +181,6 @@ pub const TokenTag = enum {
     pipe,
     plus,
     question_mark,
-    quote,
     right_brace,
     right_bracket,
     right_paren,
@@ -289,7 +287,6 @@ pub fn eql(token: Token, tag: TokenTag) bool {
             .double_hash,
             .double_minus,
             .double_plus,
-            .double_quote,
             .ellipses,
             .equal,
             .exclamation,
@@ -310,7 +307,6 @@ pub fn eql(token: Token, tag: TokenTag) bool {
             .pipe,
             .plus,
             .question_mark,
-            .quote,
             .right_brace,
             .right_bracket,
             .right_paren,

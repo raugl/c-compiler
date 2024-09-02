@@ -22,7 +22,6 @@ pub const Operator = enum {
     double_hash,
     double_minus,
     double_plus,
-    double_quote,
     ellipses,
     equal,
     exclamation,
@@ -43,7 +42,6 @@ pub const Operator = enum {
     pipe,
     plus,
     question_mark,
-    quote,
     right_brace,
     right_bracket,
     right_paren,
@@ -60,6 +58,9 @@ pub const ParseResult = struct {
     len: u32,
 };
 
+/// Accepts any string and parses an operator from its beginning, eagerly (chooses
+/// the longest operator it can find). It returns the parsed length, so you don't
+/// need to specify the precise operator length when calling it.
 pub fn parseOperator(str: []const u8) ?ParseResult {
     const OpData = struct {
         str: []const u8,
@@ -84,8 +85,6 @@ pub fn parseOperator(str: []const u8) ?ParseResult {
             .{ .str = "]", .op = .right_bracket },
             .{ .str = "{", .op = .left_brace },
             .{ .str = "}", .op = .right_brace },
-            .{ .str = "'", .op = .quote },
-            .{ .str = "\"", .op = .double_quote },
             .{ .str = "<", .op = .less },
             .{ .str = ",", .op = .comma },
             .{ .str = ">", .op = .greater },
@@ -181,7 +180,6 @@ pub fn format(op: Operator) []const u8 {
         .double_hash => "##",
         .double_minus => "--",
         .double_plus => "++",
-        .double_quote => "\"",
         .ellipses => "...",
         .equal => "==",
         .exclamation => "!",
@@ -203,7 +201,6 @@ pub fn format(op: Operator) []const u8 {
         .pipe => "|",
         .plus => "+",
         .question_mark => "?",
-        .quote => "'",
         .right_brace => "}",
         .right_bracket => "]",
         .right_paren => ")",
