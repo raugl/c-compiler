@@ -10,12 +10,12 @@ pub const Token = union(enum) {
     literal_str: []const u8,
     literal_int: struct {
         value: u128,
-        bit_width: u8,
+        width: u8,
         signed: bool,
     },
     literal_float: struct {
         value: f128,
-        bit_width: u8,
+        width: u8,
     },
     literal_bool: bool,
     keyword: kw.Keyword,
@@ -48,12 +48,12 @@ pub const Token = union(enum) {
             .literal_bool => |state| try writer.print("literal bool: {}", .{state}),
             .literal_float => |float| try writer.print(
                 "literal f{}: {}",
-                .{ float.bit_width, float.value },
+                .{ float.width, float.value },
             ),
             .literal_int => |data| {
                 try writer.print("literal {c}{}: {} ('{c}')", .{
                     @as(u8, if (data.signed) 'i' else 'u'),
-                    data.bit_width,
+                    data.width,
                     data.value,
                     @as(u8, @truncate(data.value)),
                 });

@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 
 pub const Keyword = enum {
     auto,
@@ -18,7 +17,7 @@ pub const Keyword = enum {
     for_,
     goto,
     if_,
-    in_line,
+    inline_,
     int,
     long,
     register,
@@ -101,7 +100,7 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
             .{ .str = "for", .kw = .for_ },
             .{ .str = "goto", .kw = .goto },
             .{ .str = "if", .kw = .if_ },
-            .{ .str = "inline", .kw = .in_line },
+            .{ .str = "inline", .kw = .inline_ },
             .{ .str = "int", .kw = .int },
             .{ .str = "long", .kw = .long },
             .{ .str = "register", .kw = .register },
@@ -149,24 +148,12 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
 }
 
 test "keyword.parse" {
-    // FIXME: This test is not being run
-    if (true) return error.TestNotRun;
-
-    const cases = [_]struct {
-        []const u8,
-        Keyword,
-    }{
-        .{ "if", .If },
-        .{ "inline", .Inline },
-        .{ "inf", .Int },
-        .{ "_Decimal64", ._Decimal64 },
-        .{ "_Decimal128", ._Decimal128 },
-    };
-
-    for (cases) |case| {
-        const res = try parseKeyword(case[0]);
-        try testing.expectEqual(case[1], res.op);
-    }
+    const testing = std.testing;
+    try testing.expectEqual(Keyword.if_, parseKeyword("if").?.kw);
+    try testing.expectEqual(Keyword.int, parseKeyword("int").?.kw);
+    try testing.expectEqual(Keyword.inline_, parseKeyword("inline").?.kw);
+    try testing.expectEqual(Keyword._Decimal64, parseKeyword("_Decimal64").?.kw);
+    try testing.expectEqual(Keyword._Decimal128, parseKeyword("_Decimal128").?.kw);
 }
 
 pub fn format(keyword: Keyword) []const u8 {
@@ -187,7 +174,7 @@ pub fn format(keyword: Keyword) []const u8 {
         .for_ => "for",
         .goto => "goto",
         .if_ => "if",
-        .in_line => "inline",
+        .inline_ => "inline",
         .int => "int",
         .long => "long",
         .register => "register",

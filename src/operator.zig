@@ -156,8 +156,8 @@ test "operator.parse" {
     };
 
     for (cases) |case| {
-        const res = try Operator.parse(case[0]);
-        try testing.expectequal(case[1], res.op);
+        const res = parseOperator(case[0]);
+        try testing.expectEqual(case[1], res.?.op);
     }
 }
 

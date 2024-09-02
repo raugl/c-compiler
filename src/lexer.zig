@@ -61,7 +61,7 @@ pub const TokenIterator = struct {
         };
     }
 
-    pub fn next(self: *Self) !?tk.Token {
+    pub fn next(self: *Self) !?Token {
         try self.consumeWhitespace();
         self.token_start_idx = self.idx;
         self.state = .new_token;
@@ -329,7 +329,7 @@ pub const TokenIterator = struct {
     fn finishToken(self: *Self) !?Token {
         switch (self.state) {
             .int_suffix => |state| {
-                const bit_width: u8 = switch (state.width) {
+                const width: u8 = switch (state.width) {
                     .int, .long => 32,
                     .long_long, .size => 64, // TODO: `.size` should be dependent
                     // on the target platform architecture, but as I currently
@@ -337,13 +337,13 @@ pub const TokenIterator = struct {
                 };
 
                 return Token{ .literal_int = .{
-                    .bit_width = bit_width,
+                    .width = width,
                     .signed = !state.is_unsigned,
                     .value = try util.parseInt(self.tokenStr()),
                 } };
             },
             // .literal_float => |state| {
-            //     const bit_width: u8 = switch (state) {
+            //     const width: u8 = switch (state) {
             //         .float => 32,
             //         .double => 64,
             //         .long => 128,
@@ -352,7 +352,7 @@ pub const TokenIterator = struct {
             //     const value = try std.fmt.parseFloat(f128, self.tokenStr());
             //
             //     return Token{ .literal_float = .{
-            //         .bit_width = bit_width,
+            //         .width = width,
             //         .value = value,
             //     } };
             // },
@@ -392,7 +392,7 @@ pub const TokenIterator = struct {
                 }
 
                 return Token{ .literal_int = .{
-                    .bit_width = 8,
+                    .width = 8,
                     .signed = false,
                     .value = char,
                 } };
