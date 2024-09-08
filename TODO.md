@@ -5,6 +5,7 @@
 - Make use of [this article](https://en.wikipedia.org/wiki/Recursive_descent_parser) to implement the parser.
 
 ## Done:
+- Add source location to tokens
 - Added error reporting to the lexer
 - Improve the literal int token.
 - Improve the literal float token.

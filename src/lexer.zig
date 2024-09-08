@@ -5,6 +5,53 @@ const op = @import("operator.zig");
 const tk = @import("token.zig");
 
 const Token = tk.Token;
+const LocToken = tk.LocToken;
+
+/// A wrapper around `Lexer` that opens and manages a file for lexing
+pub const FileLexer = struct {
+    const Self = @This();
+    lexer: Lexer,
+    file: std.fs.File,
+    ptr: []align(std.mem.page_size) u8,
+
+    pub fn init(alloc: std.mem.Allocator, absolute_path: []const u8) !Self {
+        return withWritter(alloc, absolute_path, std.io.getStdErr().writer());
+    }
+
+    pub fn withWritter(
+        alloc: std.mem.Allocator,
+        absolute_path: []const u8,
+        writter: std.fs.File.Writer,
+    ) !Self {
+        // NOTE: I'm only using mmap so I don't need to load the whole file into memory
+        // manually. The kernel can inteligently manage loading/unloading of pages,
+        // and I still get a contiguous slice
+        const file = try std.fs.openFileAbsolute(absolute_path, .{});
+        const md = try file.metadata();
+        const ptr = try std.posix.mmap(null, md.size(), std.posix.PROT.READ, .{ .TYPE = .SHARED }, file.handle, 0);
+        const filename = std.fs.path.basename(absolute_path);
+
+        return Self{
+            .file = file,
+            .ptr = ptr,
+            .lexer = Lexer.withWriter(alloc, ptr, filename, writter),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.lexer.deinit();
+        std.posix.munmap(self.ptr);
+        self.file.close();
+    }
+
+    pub fn next(self: *Self) !?LocToken {
+        return self.lexer.next();
+    }
+
+    pub fn hadErrors(self: Self) bool {
+        return self.lexer.hadErrors();
+    }
+};
 
 pub const Lexer = struct {
     const Self = @This();
@@ -54,11 +101,11 @@ pub const Lexer = struct {
         self.arena.deinit();
     }
 
-    pub fn next(self: *Self) !?Token {
     pub fn hadErrors(self: Self) bool {
         return self.had_errors;
     }
 
+    pub fn next(self: *Self) !?LocToken {
         self.consumeWhitespace();
 
         // NOTE: The order matters
@@ -86,7 +133,12 @@ pub const Lexer = struct {
         }
         _ = self.arena.reset(.retain_capacity);
         self.logs.clearAndFree(self.arena.allocator());
-        return token;
+
+        return LocToken{
+            .line_nr = self.line_nr + 1,
+            .col_nr = @intCast(self.line_start - self.token_start),
+            .token = token orelse return null,
+        };
     }
 
     // FIXME: This doesn't support stand-alone '\r' as newlines

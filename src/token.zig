@@ -2,6 +2,13 @@ const std = @import("std");
 const kw = @import("keyword.zig");
 const op = @import("operator.zig");
 
+/// Wrapper around `Token` that include source location information
+pub const LocToken = struct {
+    token: Token,
+    line_nr: u16 = 0,
+    col_nr: u16 = 0,
+};
+
 pub const Token = union(enum) {
     const Self = @This();
 
