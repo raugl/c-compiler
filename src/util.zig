@@ -1,175 +1,55 @@
 const std = @import("std");
 
-pub const char = struct {
-    pub fn decimal(str: []const u8) ?usize {
-        if (str.len > 0 and '0' <= str[0] and str[0] <= '9') {
-            return 1;
-        } else return null;
-    }
-
-    pub fn nonZero(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            '1'...'9' => return 1,
-            else => return null,
-        } else return null;
-    }
-
-    pub fn binary(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            '0', '1' => return 1,
-            else => return null,
-        } else return null;
-    }
-
-    pub fn octal(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            '0'...'7' => return 1,
-            else => return null,
-        } else return null;
-    }
-
-    pub fn hex(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            '0'...'9', 'a'...'f', 'A'...'F' => return 1,
-            else => return null,
-        } else return null;
-    }
-
-    pub fn whitespace(str: []const u8) ?usize {
-        return std.mem.indexOfNone(u8, str, &std.ascii.whitespace);
-    }
-
-    pub fn alphabetic(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            'a'...'z', 'A'...'Z' => return 1,
-            else => return null,
-        } else return null;
-    }
-
-    pub fn alphaNumeric(str: []const u8) ?usize {
-        if (str.len > 0) switch (str[0]) {
-            '0'...'9', 'a'...'z', 'A'...'Z' => return 1,
-            else => return null,
-        } else return null;
-    }
-};
-
-pub fn isLower(ch: u21) bool {
-    return switch (ch) {
-        'a'...'z' => true,
-        else => false,
-    };
+pub fn decimal(str: []const u8) ?usize {
+    if (str.len > 0 and '0' <= str[0] and str[0] <= '9') {
+        return 1;
+    } else return null;
 }
 
-pub fn isUpper(ch: u21) bool {
-    return switch (ch) {
-        'A'...'Z' => true,
-        else => false,
-    };
+pub fn nonZero(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        '1'...'9' => return 1,
+        else => return null,
+    } else return null;
 }
 
-pub fn isNonZero(ch: u21) bool {
-    return switch (ch) {
-        '1'...'9' => true,
-        else => false,
-    };
+pub fn binary(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        '0', '1' => return 1,
+        else => return null,
+    } else return null;
 }
 
-pub fn isDigit(ch: u21) bool {
-    return switch (ch) {
-        '0'...'9' => true,
-        else => false,
-    };
+pub fn octal(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        '0'...'7' => return 1,
+        else => return null,
+    } else return null;
 }
 
-pub fn isHex(ch: u21) bool {
-    return switch (ch) {
-        '0'...'9', 'A'...'F', 'a'...'f' => true,
-        else => false,
-    };
+pub fn hex(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        '0'...'9', 'a'...'f', 'A'...'F' => return 1,
+        else => return null,
+    } else return null;
 }
 
-pub fn isBinary(ch: u21) bool {
-    return ch == '0' or ch == '1';
+pub fn whitespace(str: []const u8) ?usize {
+    return std.mem.indexOfNone(u8, str, &std.ascii.whitespace);
 }
 
-pub fn isOctal(ch: u21) bool {
-    return switch (ch) {
-        '0'...'7' => true,
-        else => false,
-    };
+pub fn alphabetic(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        'a'...'z', 'A'...'Z' => return 1,
+        else => return null,
+    } else return null;
 }
 
-pub fn isAlphabetic(ch: u21) bool {
-    return switch (ch) {
-        'A'...'Z', 'a'...'z' => true,
-        else => false,
-    };
-}
-
-pub fn isAlphanumeric(ch: u21) bool {
-    return switch (ch) {
-        '0'...'9', 'A'...'F', 'a'...'f' => true,
-        else => false,
-    };
-}
-
-pub fn isFloatSuffix(ch: u21) bool {
-    return switch (ch) {
-        'f', 'F', 'l', 'L' => true,
-        else => false,
-    };
-}
-
-pub fn isIntSuffix(ch: u21) bool {
-    return switch (ch) {
-        'u', 'U', 'l', 'L' => true,
-        else => false,
-    };
-}
-
-/// There are the symbol chars: ,<.>/?'";:|\{}[]+=-~()!@#$%^&*
-pub fn isSymbol(ch: u21) bool {
-    return switch (ch) {
-        33...47, 58...64, 91...94, 123...126 => true,
-        else => false,
-    };
-}
-
-pub fn isLiteralBool(str: []const u8) bool {
-    return std.mem.eql(u8, str, "true") or std.mem.eql(u8, str, "false");
-}
-
-pub fn isKeyword(str: []const u8) bool {
-    const Fn = struct {
-        fn compare(_: void, a: []const u8, b: []const u8) std.math.Order {
-            return std.mem.order(u8, a, b);
-        }
-
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return compare({}, a, b) == .lt;
-        }
-    };
-
-    const keywords = comptime blk: {
-        var keywords = [_][]const u8{
-            "auto",           "break",         "case",     "char",       "const",
-            "continue",       "default",       "do",       "double",     "else",
-            "enum",           "extern",        "float",    "for",        "goto",
-            "if",             "inline",        "int",      "long",       "register",
-            "restrict",       "return",        "short",    "signed",     "sizeof",
-            "static",         "struct",        "switch",   "typedef",    "union",
-            "unsigned",       "void",          "volatile", "while",      "_Alignas",
-            "_Alignof",       "_Atomic",       "_Bool",    "_Complex",   "_Decimal128",
-            "_Decimal32",     "_Decimal64",    "_Generic", "_Imaginary", "_Noreturn",
-            "_Static_assert", "_Thread_local",
-        };
-        @setEvalBranchQuota(10_000);
-        std.mem.sortUnstable([]const u8, &keywords, {}, Fn.lessThan);
-        break :blk keywords;
-    };
-
-    return std.sort.binarySearch([]const u8, str, &keywords, {}, Fn.compare) != null;
+pub fn alphaNumeric(str: []const u8) ?usize {
+    if (str.len > 0) switch (str[0]) {
+        '0'...'9', 'a'...'z', 'A'...'Z' => return 1,
+        else => return null,
+    } else return null;
 }
 
 pub fn parseInt(str: []const u8) !u128 {
