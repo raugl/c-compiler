@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 
 pub const MAX_LEN = 3;
 pub const Operator = enum {
@@ -145,19 +144,13 @@ pub fn parseOperator(str: []const u8) ?ParseResult {
 }
 
 test "parseOperator" {
-    const cases = [_]struct {
-        []const u8,
-        Operator,
-    }{
-        .{ "->", Operator.thin_arrow }, .{ "++", Operator.double_plus },
-        .{ "+=", Operator.assign_add }, .{ "+", Operator.plus },
-        .{ "=>", Operator.assign },
-    };
-
-    for (cases) |case| {
-        const res = parseOperator(case[0]);
-        try testing.expectEqual(case[1], res.?.op);
-    }
+    const testing = std.testing;
+    try testing.expectEqual(ParseResult{ .op = .thin_arrow, .len = 2 }, parseOperator("->"));
+    try testing.expectEqual(ParseResult{ .op = .assign, .len = 1 }, parseOperator("=>"));
+    try testing.expectEqual(ParseResult{ .op = .assign_add, .len = 2 }, parseOperator("+="));
+    try testing.expectEqual(ParseResult{ .op = .double_plus, .len = 2 }, parseOperator("++"));
+    try testing.expectEqual(ParseResult{ .op = .ellipses, .len = 3 }, parseOperator("..."));
+    try testing.expectEqual(ParseResult{ .op = .plus, .len = 1 }, parseOperator("+"));
 }
 
 pub fn format(op: Operator) []const u8 {

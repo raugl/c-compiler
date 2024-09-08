@@ -151,12 +151,12 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
 }
 
 test "parseKeyword" {
-    const testing = std.testing;
-    try testing.expectEqual(Keyword.if_, parseKeyword("if").?.kw);
-    try testing.expectEqual(Keyword.int, parseKeyword("int").?.kw);
-    try testing.expectEqual(Keyword.inline_, parseKeyword("inline").?.kw);
-    try testing.expectEqual(Keyword._Decimal64, parseKeyword("_Decimal64").?.kw);
-    try testing.expectEqual(Keyword._Decimal128, parseKeyword("_Decimal128").?.kw);
+    const expectEqual = std.testing.expectEqual;
+    try expectEqual(ParseResult{ .kw = .if_, .len = 2 }, parseKeyword("if"));
+    try expectEqual(ParseResult{ .kw = .int, .len = 3 }, parseKeyword("int"));
+    try expectEqual(ParseResult{ .kw = .inline_, .len = 6 }, parseKeyword("inline"));
+    try expectEqual(ParseResult{ .kw = ._Decimal64, .len = 10 }, parseKeyword("_Decimal64"));
+    try expectEqual(ParseResult{ .kw = ._Decimal128, .len = 11 }, parseKeyword("_Decimal128"));
 }
 
 pub fn format(keyword: Keyword) []const u8 {

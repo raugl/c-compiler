@@ -136,7 +136,7 @@ pub const Lexer = struct {
 
         return LocToken{
             .line_nr = self.line_nr + 1,
-            .col_nr = @intCast(self.line_start - self.token_start),
+            .col_nr = @intCast(self.token_start - self.line_start + 1),
             .token = token orelse return null,
         };
     }
@@ -640,14 +640,14 @@ test "literalFloat" {
     const expectFloat = struct {
         fn Fn(lexer_: *Lexer, expected: comptime_float) !void {
             const tolerance = 1e-16;
-            const actual = (try lexer_.next()).?.literal_float.value;
+            const actual = (try lexer_.next()).?.token.literal_float.value;
             try std.testing.expectApproxEqAbs(expected, actual, tolerance);
         }
     }.Fn;
     const source =
         \\1e10 1e-5L 1. 1.e-2 3.14 .1f 0.1e-1L 0x1ffp10 0X0p-1 0x1.p0 0xf.p-1 0x0.123p-1 0xa.bp10l
     ;
-    var lexer = Lexer.init(std.testing.allocator, source);
+    var lexer = Lexer.init(std.testing.allocator, source, "test.c");
     defer lexer.deinit();
 
     try expectFloat(&lexer, 1e10);
@@ -666,6 +666,32 @@ test "literalFloat" {
 }
 
 test "consumeWhitespace" {
+    const Fn = struct {
+        fn expectEqualIdxs(line_nr: u32, line_start: u32, token_start: u32, idx: u32, actual: Lexer) !void {
+            try std.testing.expectEqualDeep(.{
+                line_nr,
+                line_start,
+                token_start,
+                idx,
+            }, .{
+                actual.line_nr,
+                actual.line_start,
+                actual.token_start,
+                actual.idx,
+            });
+        }
+
+        fn expectEqualToken(line_nr: u16, col_nr: u16, expected: Token, actual: anytype) !void {
+            try std.testing.expectEqualDeep(LocToken{
+                .col_nr = col_nr,
+                .line_nr = line_nr,
+                .token = expected,
+            }, actual);
+        }
+    };
+    const expectEqualIdxs = Fn.expectEqualIdxs;
+    const expectEqualToken = Fn.expectEqualToken;
+
     const source =
         \\  foo bar
         \\ foo       bar
@@ -674,21 +700,21 @@ test "consumeWhitespace" {
         \\  */
         \\
     ;
-    var self = Lexer.init(std.testing.allocator, source);
-    defer self.deinit();
+    var lexer = Lexer.init(std.testing.allocator, source, "test.c");
+    defer lexer.deinit();
 
-    try std.testing.expectEqualDeep(Token{ .identifier = "foo" }, self.next());
-    try std.testing.expectEqualDeep(.{ 0, 0, 2, 5 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+    try expectEqualToken(1, 3, .{ .identifier = "foo" }, lexer.next());
+    try expectEqualIdxs(0, 0, 2, 5, lexer);
 
-    try std.testing.expectEqualDeep(Token{ .identifier = "bar" }, self.next());
-    try std.testing.expectEqualDeep(.{ 0, 0, 6, 9 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+    try expectEqualToken(1, 7, .{ .identifier = "bar" }, lexer.next());
+    try expectEqualIdxs(0, 0, 6, 9, lexer);
 
-    try std.testing.expectEqualDeep(Token{ .identifier = "foo" }, self.next());
-    try std.testing.expectEqualDeep(.{ 1, 10, 11, 14 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+    try expectEqualToken(2, 2, .{ .identifier = "foo" }, lexer.next());
+    try expectEqualIdxs(1, 10, 11, 14, lexer);
 
-    try std.testing.expectEqualDeep(Token{ .identifier = "bar" }, self.next());
-    try std.testing.expectEqualDeep(.{ 1, 10, 21, 24 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+    try expectEqualToken(2, 12, .{ .identifier = "bar" }, lexer.next());
+    try expectEqualIdxs(1, 10, 21, 24, lexer);
 
-    try std.testing.expectEqualDeep(Token{ .comment = "/*\n  *\n  */" }, self.next());
-    try std.testing.expectEqualDeep(.{ 2, 25, 26, 37 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+    try expectEqualToken(3, 2, .{ .comment = "/*\n  *\n  */" }, lexer.next());
+    try expectEqualIdxs(2, 25, 26, 37, lexer);
 }
