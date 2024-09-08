@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const clap = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("clap", clap.module("clap"));
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -26,7 +32,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_tests.step);
 }
