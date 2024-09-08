@@ -53,7 +53,7 @@ pub fn alphaNumeric(str: []const u8) ?usize {
 }
 
 pub fn parseInt(str: []const u8) !u128 {
-    if (str.len == 0) return error.InvalidCharacter;
+    if (str.len == 0) return error.EmptyString;
 
     const base: u8, var str_start = blk: {
         if (str[0] == '0') {
@@ -73,7 +73,7 @@ pub fn parseInt(str: []const u8) !u128 {
 
 // TODO: This implementation is probably suboptimal
 pub fn parseFloat(str: []const u8) !f128 {
-    if (str.len == 0) return error.InvalidCharacter;
+    if (str.len == 0) return error.EmptyString;
 
     var base: u8, var str_start = blk: {
         const is_hex = str.len >= 2 and str[0] == '0' and str[1] == 'x' or str[1] == 'X';
@@ -98,7 +98,7 @@ pub fn parseFloat(str: []const u8) !f128 {
         str_start = str_start[1..];
 
         var negative = false;
-        if (str_start.len > 0 and str_start[0] == '-' or str_start[0] == '+') {
+        if (str_start.len > 0 and (str_start[0] == '-' or str_start[0] == '+')) {
             if (str_start[0] == '-') negative = true;
             str_start = str_start[1..];
         }
@@ -127,10 +127,9 @@ fn isBase(ch: u8, base: u8) bool {
 
 fn parseIntBase(comptime T: type, str: *[]const u8, num: *T, base: u8) !u16 {
     if (str.len == 0) return 0;
-    if (str.*[0] == '\'') return error.InvalidCharacter;
-
-    var i = @as(u16, 0);
     var num_digits = @as(u16, 0);
+    var i = @as(u16, 0);
+
     while (i < str.len) : (i += 1) {
         if (str.*[i] == '\'') continue;
         const digit = std.fmt.charToDigit(str.*[i], base) catch break;
@@ -139,8 +138,6 @@ fn parseIntBase(comptime T: type, str: *[]const u8, num: *T, base: u8) !u16 {
         num.* +%= digit;
         num_digits += 1;
     }
-
-    if (str.*[i - 1] == '\'') return error.InvalidCharacter;
     str.* = str.*[i..];
     return num_digits;
 }

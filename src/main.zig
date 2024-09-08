@@ -24,10 +24,11 @@ pub fn main() !void {
     const alloc = gpa.allocator();
     defer _ = gpa.deinit();
 
-    var lexer = tok.Lexer.init(alloc, source);
+    var lexer = tok.Lexer.init(alloc, source, "demo.c");
     defer lexer.deinit();
+    const stdout = std.io.getStdOut().writer();
     while (try lexer.next()) |token| {
-        std.debug.print("{}\n", .{token});
+        try stdout.print("{}\n", .{token.token});
     }
-    std.debug.print("EoF\n", .{});
+    try stdout.writeAll("EoF\n");
 }

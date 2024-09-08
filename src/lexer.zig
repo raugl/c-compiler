@@ -1,36 +1,65 @@
 const std = @import("std");
 const util = @import("util.zig");
-const tk = @import("token.zig");
 const kw = @import("keyword.zig");
 const op = @import("operator.zig");
+const tk = @import("token.zig");
 
 const Token = tk.Token;
-const ch = util.char;
 
 pub const Lexer = struct {
     const Self = @This();
 
-    idx: u32 = 0,
-    token_start: u32 = 0,
     source: []const u8,
+    filename: []const u8,
+    idx: u32 = 0,
+    line_start: u32 = 0,
+    token_start: u32 = 0,
+    line_nr: u16 = 0,
+    had_errors: bool = false,
     first_on_line: bool = true, // TODO: for macros
-    idx_stack: std.ArrayList(u32),
+
+    writer: std.fs.File.Writer,
+    arena: std.heap.ArenaAllocator,
+    logs: std.ArrayListUnmanaged(LogRecord),
+
+    const LogRecord = struct {
+        msg: []const u8,
+        severity: []const u8,
+        color: []const u8,
+        idx: ?u32,
+    };
 
     /// Deinitialize with `deinit`.
-    pub fn init(alloc: std.mem.Allocator, source: []const u8) Self {
+    pub fn init(alloc: std.mem.Allocator, source: []const u8, filename: []const u8) Self {
+        return withWriter(alloc, source, filename, std.io.getStdErr().writer());
+    }
+
+    /// The writer used to print output to. `init` defaults to stderr
+    pub fn withWriter(
+        alloc: std.mem.Allocator,
+        source: []const u8,
+        filename: []const u8,
+        writer: std.fs.File.Writer,
+    ) Self {
         return Self{
             .source = source,
-            .idx_stack = std.ArrayList(u32).init(alloc),
+            .filename = filename,
+            .writer = writer,
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .logs = std.ArrayListUnmanaged(LogRecord){},
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.idx_stack.deinit();
+        self.arena.deinit();
     }
 
     pub fn next(self: *Self) !?Token {
-        optional(self.match(ch.whitespace));
-        self.token_start = self.idx;
+    pub fn hadErrors(self: Self) bool {
+        return self.had_errors;
+    }
+
+        self.consumeWhitespace();
 
         // NOTE: The order matters
         const token =
@@ -41,15 +70,37 @@ pub const Lexer = struct {
             try self.comment() orelse
             try self.literalStr() orelse
             try self.literalChar() orelse
-            self.operator() orelse
-            try self.literalNumeric();
+            try self.literalNumeric() orelse
+            self.operator();
 
         if (token == null) {
             const source = self.source[self.idx..];
-            const no_more_chars = std.mem.indexOfNone(u8, source, &std.ascii.whitespace) == null;
-            return if (no_more_chars) token else error.InvalidToken;
+            if (std.mem.indexOfNone(u8, source, &std.ascii.whitespace) != null) {
+                self.idx += @intCast(std.mem.indexOfAny(u8, source, "\r\n") orelse self.source.len);
+                try self.err("invalid bytes", null, .{});
+            }
         }
+
+        for (self.logs.items) |rec| {
+            try self.log(rec);
+        }
+        _ = self.arena.reset(.retain_capacity);
+        self.logs.clearAndFree(self.arena.allocator());
         return token;
+    }
+
+    // FIXME: This doesn't support stand-alone '\r' as newlines
+    fn consumeWhitespace(self: *Self) void {
+        const new_idx = std.mem.indexOfNonePos(u8, self.source, self.idx, &std.ascii.whitespace);
+        self.idx = @intCast(new_idx orelse self.source.len);
+
+        for (self.source[self.token_start..self.idx], 0..) |ch, i| {
+            if (ch == '\n') {
+                self.line_start = self.token_start + @as(u32, @intCast(i + 1));
+                self.line_nr += 1;
+            }
+        }
+        self.token_start = self.idx;
     }
 
     fn literalBool(self: *Self) ?Token {
@@ -63,8 +114,8 @@ pub const Lexer = struct {
     }
 
     fn identifier(self: *Self) ?Token {
-        if (self.match('_') or self.match(ch.alphabetic)) {
-            while (self.match('_') or self.match(ch.alphaNumeric)) {}
+        if (self.match('_') or self.match(util.alphabetic)) {
+            while (self.match('_') or self.match(util.alphaNumeric)) {}
             return Token{ .identifier = self.tokenStr() };
         }
         return null;
@@ -78,9 +129,12 @@ pub const Lexer = struct {
             return Token{ .comment = self.tokenStr() };
         }
         if (self.match("/*")) {
-            const source = self.source[self.idx..];
-            const len = std.mem.indexOf(u8, source, "*/") orelse return error.UnmatchedBlockComment;
-            self.idx += @intCast(len + 2);
+            if (std.mem.indexOfPos(u8, self.source, self.idx, "*/")) |end_idx| {
+                self.idx = @intCast(end_idx + 2);
+                return Token{ .comment = self.tokenStr() };
+            }
+            self.idx = @intCast(self.source.len);
+            try self.err("unterminated block comment", null, .{});
             return Token{ .comment = self.tokenStr() };
         }
         return null;
@@ -102,11 +156,8 @@ pub const Lexer = struct {
 
     // TODO:
     fn preproc(self: *Self) ?Token {
-        self.pushIdx();
-        defer self.popIdx();
-
         if (self.first_on_line and self.match('#')) {
-            optional(self.match(ch.whitespace));
+            optional(self.match(util.whitespace));
 
             if (self.match("include")) {
                 return Token{ .preproc = .include };
@@ -130,7 +181,7 @@ pub const Lexer = struct {
                 return Token{ .preproc = .elifdef };
             } else if (self.match("elifndef")) {
                 return Token{ .preproc = .elifndef };
-            } else if (self.expect("endif")) {
+            } else if (self.match("endif")) {
                 return Token{ .preproc = .endif };
             }
         }
@@ -140,9 +191,13 @@ pub const Lexer = struct {
     // TODO:
     fn literalStr(self: *Self) !?Token {
         if (self.match('"')) {
-            const source = self.source[self.idx..];
-            const len = std.mem.indexOfScalar(u8, source, '"') orelse return error.UnmatchedDoubleQuote;
-            self.idx += @intCast(len + 1);
+            if (std.mem.indexOfScalarPos(u8, self.source, self.idx, '"')) |end_idx| {
+                self.idx = @intCast(end_idx + 1);
+            } else {
+                const end_idx = std.mem.indexOfAnyPos(u8, self.source, self.idx, "\r\n");
+                self.idx = @intCast(end_idx orelse self.source.len);
+                try self.err("missing terminating \" character", null, .{});
+            }
             return Token{ .literal_str = self.tokenStr() };
         }
         return null;
@@ -151,44 +206,44 @@ pub const Lexer = struct {
     // TODO:
     fn literalChar(self: *Self) !?Token {
         if (self.match("'")) {
-            const source = self.source[self.idx..];
-            const len = std.mem.indexOfScalar(u8, source, '\'') orelse return error.UnmatchedQuote;
-            self.idx += @intCast(len + 1);
+            if (std.mem.indexOfScalarPos(u8, self.source, self.idx, '\'')) |end_idx| {
+                self.idx = @intCast(end_idx + 1);
+            } else {
+                const end_idx = std.mem.indexOfAnyPos(u8, self.source, self.idx, "\r\n");
+                self.idx = @intCast(end_idx orelse self.source.len);
+                try self.err("missing terminating ' character", null, .{});
+            }
             return Token{ .literal_str = self.tokenStr() };
         }
         return null;
     }
 
     fn literalNumeric(self: *Self) !?Token {
-        self.pushIdx();
-        defer self.popIdx();
-
         // NOTE: The order matters
-        if (try self.literalFloat(.dec)) |token| {
-            return token;
-        }
         if (self.match("0b") or self.match("0B")) {
-            return self.expect(try self.literalInt(ch.binary));
+            return try self.literalInt(util.binary);
         }
         if (self.match("0x") or self.match("0X")) {
-            return self.expect(try self.literalFloat(.hex) orelse try self.literalInt(ch.hex));
+            return try self.literalNumericHex();
+        }
+        if (try self.literalFloat()) |token| {
+            return token;
+        }
+        if (self.peek(util.nonZero)) {
+            return self.literalInt(util.decimal);
         }
         if (self.peek('0')) {
-            return self.expect(try self.literalInt(ch.octal));
-        }
-        if (self.peek(ch.nonZero)) {
-            return self.literalInt(ch.decimal);
+            return self.literalInt(util.octal);
         }
         return null;
     }
 
     fn literalInt(self: *Self, digitFn: MatchFn) !?Token {
-        self.pushIdx();
-        defer self.popIdx();
-
-        if (!self.expect(self.literalDigitSequence(digitFn))) return null;
+        if (!try self.literalDigitSequence(digitFn)) {
+            try self.err("no digits in literal integer constant", self.idx - 1, .{});
+        }
         const value = try util.parseInt(self.tokenStr());
-        const suffix = self.literalIntSuffix() orelse LiteralIntSuffixResult{};
+        const suffix = try self.literalIntSuffix() orelse LiteralIntSuffixResult{};
 
         return Token{ .literal_int = .{
             .value = value,
@@ -202,126 +257,191 @@ pub const Lexer = struct {
         signed: bool = true,
     };
 
-    fn literalIntSuffix(self: *Self) ?LiteralIntSuffixResult {
-        if (self.match('u') or self.match('U')) {
-            const width = self.literalIntSuffixWidth() orelse 32;
-            return LiteralIntSuffixResult{
-                .width = width,
-                .signed = false,
-            };
-        } else if (self.literalIntSuffixWidth()) |width| {
-            const unsigned = self.match('u') or self.match('U');
-            return LiteralIntSuffixResult{
-                .width = width,
-                .signed = !unsigned,
-            };
-        } else return null;
+    fn literalIntSuffix(self: *Self) !?LiteralIntSuffixResult {
+        const start_idx = self.idx;
+        const res = blk: {
+            if (self.match('u') or self.match('U')) {
+                const width = self.literalIntSuffixWidth() orelse 32;
+                break :blk LiteralIntSuffixResult{
+                    .width = width,
+                    .signed = false,
+                };
+            } else if (self.literalIntSuffixWidth()) |width| {
+                const unsigned = self.match('u') or self.match('U');
+                break :blk LiteralIntSuffixResult{
+                    .width = width,
+                    .signed = !unsigned,
+                };
+            }
+            break :blk null;
+        };
+        var has_extra = false;
+        while (self.match('_') or self.match(util.alphaNumeric)) has_extra = true;
+
+        if (has_extra) {
+            const suffix = self.source[start_idx..self.idx];
+            try self.err("invalid suffix \"{s}\" for integer constant", start_idx, .{suffix});
+        }
+        return res;
     }
 
     fn literalIntSuffixWidth(self: *Self) ?u8 {
         // NOTE: The order matters
         if (self.match("ll") or self.match("LL")) {
             return 64;
-        } else if (self.match('z') or self.match('Z')) {
-            return 64;
         } else if (self.match('l') or self.match('L')) {
             return 32;
+        } else if (self.match('z') or self.match('Z')) {
+            return 64;
         }
         return null;
     }
 
     const LiteralFloatBase = enum { dec, hex };
 
-    fn literalFloat(self: *Self, comptime base: LiteralFloatBase) !?Token {
-        self.pushIdx();
-        defer self.popIdx();
+    fn literalFloat(self: *Self) !?Token {
+        const rollback_idx = self.idx;
 
-        const digitFn = switch (base) {
-            .dec => ch.decimal,
-            .hex => ch.hex,
-        };
-
-        if (self.literalDigitSequence(digitFn)) {
+        if (try self.literalDigitSequence(util.decimal)) {
             if (self.match('.')) {
-                optional(self.literalDigitSequence(digitFn));
-                switch (base) {
-                    .dec => optional(self.literalFloatExponent(base)),
-                    .hex => if (!self.expect(self.literalFloatExponent(base))) return null,
-                }
-
-                const width = self.literalFloatSuffix() orelse 64;
+                optional(try self.literalDigitSequence(util.decimal));
+                optional(try self.literalFloatExponent(.dec));
+                const width = try self.literalFloatSuffix() orelse 64;
                 const value = try util.parseFloat(self.tokenStr());
-                return Token{ .literal_float = .{ .width = width, .value = value } };
+                return Token{ .literal_float = .{
+                    .width = width,
+                    .value = value,
+                } };
             } else {
-                if (!self.expect(self.literalFloatExponent(base))) return null;
-                const width = self.literalFloatSuffix() orelse 64;
+                if (!try self.literalFloatExponent(.dec)) {
+                    self.idx = rollback_idx;
+                    return null;
+                }
+                const width = try self.literalFloatSuffix() orelse 64;
                 const value = try util.parseFloat(self.tokenStr());
-                return Token{ .literal_float = .{ .width = width, .value = value } };
+                return Token{ .literal_float = .{
+                    .width = width,
+                    .value = value,
+                } };
             }
         }
         if (self.match('.')) {
-            if (!self.expect(self.literalDigitSequence(digitFn))) return null;
-            switch (base) {
-                .dec => optional(self.literalFloatExponent(base)),
-                .hex => if (!self.expect(self.literalFloatExponent(base))) return null,
+            if (!try self.literalDigitSequence(util.decimal)) {
+                self.idx = rollback_idx;
+                return null;
             }
-
-            const width = self.literalFloatSuffix() orelse 64;
+            optional(try self.literalFloatExponent(.dec));
+            const width = try self.literalFloatSuffix() orelse 64;
             const value = try util.parseFloat(self.tokenStr());
-            return Token{ .literal_float = .{ .width = width, .value = value } };
+            return Token{ .literal_float = .{
+                .width = width,
+                .value = value,
+            } };
         }
         return null;
     }
 
-    fn literalFloatExponent(self: *Self, comptime base: LiteralFloatBase) bool {
-        const has_exponent, const digitFn = switch (base) {
-            .dec => .{ self.match('e') or self.match('E'), ch.decimal },
-            .hex => .{ self.match('p') or self.match('P'), ch.hex },
+    fn literalNumericHex(self: *Self) !?Token {
+        const rollback_idx = self.idx;
+
+        if (try self.literalDigitSequence(util.hex)) {
+            if (self.match('.')) {
+                optional(try self.literalDigitSequence(util.hex));
+                if (!try self.literalFloatExponent(.hex)) {
+                    try self.err("hexadecimal floating constants require an exponent", null, .{});
+                }
+                const value = try util.parseFloat(self.tokenStr());
+                const width = try self.literalFloatSuffix() orelse 64;
+                return Token{ .literal_float = .{
+                    .width = width,
+                    .value = value,
+                } };
+            } else {
+                if (!try self.literalFloatExponent(.hex)) {
+                    self.idx = rollback_idx;
+                    return self.literalInt(util.hex);
+                }
+                const value = try util.parseFloat(self.tokenStr());
+                const width = try self.literalFloatSuffix() orelse 64;
+                return Token{ .literal_float = .{
+                    .width = width,
+                    .value = value,
+                } };
+            }
+        }
+        if (self.match('.')) {
+            if (!try self.literalDigitSequence(util.hex)) {
+                try self.err("no digits in hexadecimal floating constant", self.idx - 1, .{});
+            }
+            if (!try self.literalFloatExponent(.hex)) {
+                try self.err("hexadecimal floating constants require an exponent", null, .{});
+            }
+            const value = try util.parseFloat(self.tokenStr());
+            const width = try self.literalFloatSuffix() orelse 64;
+            return Token{ .literal_float = .{
+                .width = width,
+                .value = value,
+            } };
+        }
+        return self.literalInt(util.hex);
+    }
+
+    fn literalFloatExponent(self: *Self, comptime base: LiteralFloatBase) !bool {
+        const has_exponent = switch (base) {
+            .dec => self.match('e') or self.match('E'),
+            .hex => self.match('p') or self.match('P'),
         };
 
         if (has_exponent) {
             optional(self.match('+') or self.match('-'));
-            return self.literalDigitSequence(digitFn);
+            if (!try self.literalDigitSequence(util.decimal)) {
+                try self.err("exponent has no digits", self.idx - 1, .{});
+            }
         }
-        return false;
+        return has_exponent;
     }
 
-    fn literalFloatSuffix(self: *Self) ?u8 {
-        if (self.match('f') or self.match('F')) {
-            return 32;
-        } else if (self.match('l') or self.match('L')) {
-            return 128;
+    fn literalFloatSuffix(self: *Self) !?u8 {
+        const start_idx = self.idx;
+        const res: ?u8 = blk: {
+            if (self.match('f') or self.match('F')) {
+                break :blk 32;
+            } else if (self.match('l') or self.match('L')) {
+                break :blk 128;
+            }
+            break :blk null;
+        };
+        var has_extra = false;
+        while (self.match('_') or self.match(util.alphaNumeric)) has_extra = true;
+
+        if (has_extra) {
+            const suffix = self.source[start_idx..self.idx];
+            try self.err("invalid suffix \"{s}\" for floating constant", start_idx, .{suffix});
         }
-        return null;
+        return res;
     }
 
-    fn literalDigitSequence(self: *Self, digitFn: MatchFn) bool {
-        self.pushIdx();
-        defer self.popIdx();
-
-        if (self.match(digitFn)) while (true) {
+    fn literalDigitSequence(self: *Self, digitFn: MatchFn) !bool {
+        if (self.match("'")) {
+            try self.err("digit separator outside digit sequence", self.idx - 1, .{});
+        }
+        var has_digits = false;
+        while (true) {
             if (self.match(digitFn)) {
-                continue;
+                has_digits = true;
             } else if (self.match("'")) {
                 while (self.match("'")) {}
-                if (!self.expect(digitFn)) return false;
-            } else {
-                return true;
-            }
-        };
-        return false;
+                if (!self.peek(digitFn)) {
+                    try self.err("digit separator outside digit sequence", self.idx - 1, .{});
+                    break;
+                }
+            } else break;
+        }
+        return has_digits;
     }
 
     fn tokenStr(self: Self) []const u8 {
         return self.source[self.token_start..self.idx];
-    }
-
-    fn pushIdx(self: *Self) void {
-        self.idx_stack.append(self.idx) catch @panic("lexer allocator out of memory");
-    }
-
-    fn popIdx(self: *Self) void {
-        if (self.idx_stack.popOrNull() == null) @panic("popIdx(): Forgot to pushIdx()");
     }
 
     const MatchFn = fn ([]const u8) ?usize;
@@ -356,43 +476,6 @@ pub const Lexer = struct {
         return false;
     }
 
-    // TODO: This is now mostly wrong
-    /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
-    /// input string starts with the sequence of chars described by it. It can also
-    /// accept a plain `bool` representing a successful match in case your function can't
-    /// conform to the `MatchFn` interface.
-    /// If there is no match, it rolls back the head index to the previous 'match frame',
-    /// same as `self.popIdx()`. A new match frame may be started by using
-    /// `self.pushIdx()` and must be ended on all possible code paths. This means that
-    /// if you have `if`s in your code, you may still need to call `self.popIdx()` explicitly.
-    /// ```zig
-    /// fn matchHello(self: *Self) bool {
-    ///     self.pushIdx();
-    ///     return self.expect(self.match('H') or self.match('h')) and self.expect("ello");
-    /// }
-    /// ```
-    fn expect(self: *Self, what: anytype) if (@typeInfo(@TypeOf(what)) != .Optional) bool else @TypeOf(what) {
-        const Type = @TypeOf(what);
-        const stack = self.idx_stack.items;
-
-        if (Type == bool) {
-            if (what == false) self.idx = stack[stack.len - 1];
-            return what;
-        } else if (@typeInfo(Type) == .Optional) {
-            if (what == null) self.idx = stack[stack.len - 1];
-            return what;
-        } else if (comptime Type == MatchFn or
-            util.isConvertibleTo(Type, u8) or
-            util.isConvertibleTo(Type, []const u8))
-        {
-            const ok = self.match(what);
-            if (ok == false) self.idx = stack[stack.len - 1];
-            return ok;
-        } else @compileError("unexpected type '" ++ @typeName(Type) ++
-            "', expect() only accepts values of type: 'bool', 'u8', " ++
-            "'[]const u8', and 'MatchFn' (aka 'fn ([]const u8) ?usize')");
-    }
-
     /// Takes in a `u8`, `[]const u8`, or `MatchFn` and checks if the current head of the
     /// input string starts with the sequence of chars described by it.
     ///
@@ -417,56 +500,143 @@ pub const Lexer = struct {
     /// This has no practical function, it is here just to be sprinkled through the code
     /// to make it more readable by signaling intent rather than ignoring a random value.
     /// ```zig
-    ///     optional(self.literalDigitSequence(ch.hex));
+    ///     optional(self.literalDigitSequence(util.hex));
     /// ```
     ///
     /// See also: [Lexer.expect()](src/lexer.zig)
     fn optional(ok: anytype) void {
         _ = ok;
     }
-};
 
-test Lexer {
-    const testing = std.testing;
-    const source =
-        \\1e10
-        \\1e-5L
-        \\1.
-        \\1.e-2
-        \\3.14
-        \\.1f
-        \\0.1e-1L
-        \\0x1ffp10
-        \\0X0p-1
-        \\0x1.p0
-        \\0xf.p-1
-        \\0x0.123p-1
-        \\0xa.bp10l
-    ;
-
-    const expected = [_]f128{
-        1e10,
-        1e-5,
-        1.0,
-        1.0e-2,
-        3.14,
-        0.1,
-        0.1e-1,
-        0x1ffp10,
-        0x0p-1,
-        0x1.p0,
-        0xf.p-1,
-        0x0.123p-1,
-        0xa.bp10,
+    const esc = struct {
+        const err = bold ++ "\x1b[91m";
+        const warn = bold ++ "\x1b[95m";
+        const note = bold ++ "\x1b[96m";
+        const bold = "\x1b[1m";
+        const reset = "\x1b[m";
     };
 
-    var lexer = Lexer.init(testing.allocator, source);
+    fn note(self: Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
+        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
+        try self.logs.append(self.arena.allocator(), .{
+            .msg = msg,
+            .idx = idx,
+            .severity = "note",
+            .color = esc.note,
+        });
+    }
+
+    fn warn(self: Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
+        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
+        try self.logs.append(self.arena.allocator(), .{
+            .msg = msg,
+            .idx = idx,
+            .severity = "warning",
+            .color = esc.warn,
+        });
+    }
+
+    fn err(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
+        self.had_errors = true;
+        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
+        try self.logs.append(self.arena.allocator(), .{
+            .msg = msg,
+            .idx = idx,
+            .severity = "error",
+            .color = esc.err,
+        });
+    }
+
+    // FIXME: tabs break this
+    fn log(self: Self, rec: LogRecord) !void {
+        const column = self.token_start - self.line_start;
+        try self.writer.print(esc.bold ++ "{[file]s}:{[row_nr]}:{[col_nr]}: {[color]s}{[severity]s}:" ++ esc.reset ++ " {[msg]s}\n", .{
+            .file = self.filename,
+            .row_nr = self.line_nr + 1,
+            .col_nr = column + 1,
+            .msg = rec.msg,
+            .color = rec.color,
+            .severity = rec.severity,
+        });
+
+        const line_end = std.mem.indexOfAnyPos(u8, self.source, self.token_start, "\r\n") orelse self.source.len;
+        const line = self.source[self.line_start..line_end];
+        const hgl_start = column; // highlight start
+        const hgl_end = @min(line_end, self.idx) - self.line_start;
+        try self.writer.print("{[row_nr]:>5} | {[pre]s}{[color]s}{[highlight]s}" ++ esc.reset ++ "{[post]s}\n", .{
+            .row_nr = self.line_nr + 1,
+            .pre = line[0..hgl_start],
+            .highlight = line[hgl_start..hgl_end],
+            .post = line[hgl_end..],
+            .color = rec.color,
+        });
+
+        const tabs = std.mem.count(u8, line, "\t") * 7; // assume 8-wide tabs in the terminal
+        const caret = (rec.idx orelse self.token_start) - self.line_start;
+        const padding = " " ** 256;
+        const squirly = "~" ** 256;
+        try self.writer.print("      | {[padding]s}{[color]s}{[pre]s}^{[post]s}" ++ esc.reset ++ "\n", .{
+            .padding = padding[0..(hgl_start + tabs)],
+            .pre = squirly[0..(caret - hgl_start)],
+            .post = squirly[0..(hgl_end - caret -| 1)],
+            .color = rec.color,
+        });
+    }
+};
+
+test "literalFloat" {
+    const expectFloat = struct {
+        fn Fn(lexer_: *Lexer, expected: comptime_float) !void {
+            const tolerance = 1e-16;
+            const actual = (try lexer_.next()).?.literal_float.value;
+            try std.testing.expectApproxEqAbs(expected, actual, tolerance);
+        }
+    }.Fn;
+    const source =
+        \\1e10 1e-5L 1. 1.e-2 3.14 .1f 0.1e-1L 0x1ffp10 0X0p-1 0x1.p0 0xf.p-1 0x0.123p-1 0xa.bp10l
+    ;
+    var lexer = Lexer.init(std.testing.allocator, source);
     defer lexer.deinit();
 
-    var i = @as(usize, 0);
-    while (try lexer.next()) |token| {
-        const actual = token.literal_float.value;
-        try testing.expectApproxEqRel(expected[i], actual, 1e-16); // TODO: Improve the precision
-        i += 1;
-    }
+    try expectFloat(&lexer, 1e10);
+    try expectFloat(&lexer, 1e-5);
+    try expectFloat(&lexer, 1.0);
+    try expectFloat(&lexer, 1.0e-2);
+    try expectFloat(&lexer, 3.14);
+    try expectFloat(&lexer, 0.1);
+    try expectFloat(&lexer, 0.1e-1);
+    try expectFloat(&lexer, 0x1ffp10);
+    try expectFloat(&lexer, 0x0p-1);
+    try expectFloat(&lexer, 0x1.p0);
+    try expectFloat(&lexer, 0xf.p-1);
+    try expectFloat(&lexer, 0x0.123p-1);
+    try expectFloat(&lexer, 0xa.bp10);
+}
+
+test "consumeWhitespace" {
+    const source =
+        \\  foo bar
+        \\ foo       bar
+        \\ /*
+        \\  *
+        \\  */
+        \\
+    ;
+    var self = Lexer.init(std.testing.allocator, source);
+    defer self.deinit();
+
+    try std.testing.expectEqualDeep(Token{ .identifier = "foo" }, self.next());
+    try std.testing.expectEqualDeep(.{ 0, 0, 2, 5 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+
+    try std.testing.expectEqualDeep(Token{ .identifier = "bar" }, self.next());
+    try std.testing.expectEqualDeep(.{ 0, 0, 6, 9 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+
+    try std.testing.expectEqualDeep(Token{ .identifier = "foo" }, self.next());
+    try std.testing.expectEqualDeep(.{ 1, 10, 11, 14 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+
+    try std.testing.expectEqualDeep(Token{ .identifier = "bar" }, self.next());
+    try std.testing.expectEqualDeep(.{ 1, 10, 21, 24 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
+
+    try std.testing.expectEqualDeep(Token{ .comment = "/*\n  *\n  */" }, self.next());
+    try std.testing.expectEqualDeep(.{ 2, 25, 26, 37 }, .{ self.line_nr, self.line_start, self.token_start, self.idx });
 }
