@@ -33,7 +33,7 @@ pub const Keyword = enum {
     union_,
     unsigned,
     void,
-    vola_tile,
+    volatile_,
     while_,
     _Alignas,
     _Alignof,
@@ -119,7 +119,7 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
             .{ .str = "union", .kw = .union_ },
             .{ .str = "unsigned", .kw = .unsigned },
             .{ .str = "void", .kw = .void },
-            .{ .str = "volatile", .kw = .vola_tile },
+            .{ .str = "volatile", .kw = .volatile_ },
             .{ .str = "while", .kw = .while_ },
             .{ .str = "_Alignas", .kw = ._Alignas },
             .{ .str = "_Alignof", .kw = ._Alignof },
@@ -150,7 +150,7 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
     return null;
 }
 
-test "keyword.parse" {
+test "parseKeyword" {
     const testing = std.testing;
     try testing.expectEqual(Keyword.if_, parseKeyword("if").?.kw);
     try testing.expectEqual(Keyword.int, parseKeyword("int").?.kw);
@@ -193,7 +193,7 @@ pub fn format(keyword: Keyword) []const u8 {
         .union_ => "union",
         .unsigned => "unsigned",
         .void => "void",
-        .vola_tile => "volatile",
+        .volatile_ => "volatile",
         .while_ => "while",
         ._Alignas => "_Alignas",
         ._Alignof => "_Alignof",

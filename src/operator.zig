@@ -4,7 +4,6 @@ const testing = std.testing;
 pub const MAX_LEN = 3;
 pub const Operator = enum {
     ampersand,
-    logical_and,
     assign,
     assign_add,
     assign_div,
@@ -34,9 +33,10 @@ pub const Operator = enum {
     left_shift,
     less,
     less_equal,
+    logical_and,
+    logical_or,
     minus,
     not_equal,
-    logical_or,
     percent,
     period,
     pipe,
@@ -144,7 +144,7 @@ pub fn parseOperator(str: []const u8) ?ParseResult {
     return null;
 }
 
-test "operator.parse" {
+test "parseOperator" {
     const cases = [_]struct {
         []const u8,
         Operator,
