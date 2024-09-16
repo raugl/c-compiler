@@ -14,7 +14,7 @@ pub const Token = union(enum) {
 
     comment: []const u8,
     identifier: []const u8,
-    literal_str: []const u8,
+    literal_bool: bool,
     literal_int: struct {
         value: u128,
         width: u8,
@@ -24,7 +24,13 @@ pub const Token = union(enum) {
         value: f128,
         width: u8,
     },
-    literal_bool: bool,
+    literal_str: union(enum) {
+        char: []const u8,
+        utf8: []const u8,
+        utf16: []const u16,
+        utf32: []const u32,
+        wchar: []const u32, // FIXME: For whatever-the-fuck reason `wchar_t` on Windows is only 16 bits wide
+    },
     keyword: kw.Keyword,
     operator: op.Operator,
     preproc: enum {
@@ -49,9 +55,9 @@ pub const Token = union(enum) {
         writer: anytype,
     ) !void {
         _ = .{ fmt, options };
+        var codepoint_buf = [_]u8{undefined} ** 4;
 
         switch (self) {
-            .literal_str => |str| try writer.print("literal str: {s}", .{str}),
             .literal_bool => |state| try writer.print("literal bool: {}", .{state}),
             .literal_float => |float| try writer.print(
                 "literal f{}: {}",
@@ -64,6 +70,37 @@ pub const Token = union(enum) {
                     data.value,
                     @as(u8, @truncate(data.value)),
                 });
+            },
+            .literal_str => |lit_str| switch (lit_str) {
+                .char => |str| try writer.print("literal str: \"{s}\"", .{str}),
+                .utf8 => |str| try writer.print("literal str: u8\"{s}\"", .{str}),
+                .utf16 => |str| {
+                    try writer.writeAll("literal str: u\"");
+                    var it = std.unicode.Utf16LeIterator.init(str);
+                    while (try it.nextCodepoint()) |codepoint| {
+                        const len = try std.unicode.utf8Encode(codepoint, &codepoint_buf);
+                        try writer.writeAll(codepoint_buf[0..len]);
+                    }
+                    try writer.writeAll("\"");
+                },
+                .utf32 => |str| {
+                    try writer.writeAll("literal str: U\"");
+                    for (str) |ch| {
+                        const codepoint: u21 = @truncate(@min(ch, 0x10_ffff));
+                        const len = try std.unicode.utf8Encode(codepoint, &codepoint_buf);
+                        try writer.writeAll(codepoint_buf[0..len]);
+                    }
+                    try writer.writeAll("\"");
+                },
+                .wchar => |str| { // FIXME: For whatever-the-fuck reason `wchar_t` on Windows is only 16 bits wide
+                    try writer.writeAll("literal str: L\"");
+                    for (str) |ch| {
+                        const codepoint: u21 = @truncate(@min(ch, 0x10_ffff));
+                        const len = try std.unicode.utf8Encode(codepoint, &codepoint_buf);
+                        try writer.writeAll(codepoint_buf[0..len]);
+                    }
+                    try writer.writeAll("\"");
+                },
             },
             .comment => |body| try writer.print("comment: {s}", .{body}),
             .identifier => |name| try writer.print("identifier: \"{s}\"", .{name}),

@@ -2,25 +2,6 @@ const std = @import("std");
 const clap = @import("clap");
 const lex = @import("lexer.zig");
 
-const demo_source =
-    \\#pragma once
-    \\#include "stdio.h"
-    \\
-    \\typedef struct {
-    \\  float x, y;
-    \\} vec2;
-    \\int func(void) {}
-    \\
-    \\extern void printf(const char*, ...);
-    \\
-    \\int main(int argc, char** /*argv*/) {
-    \\  const int num = 0xaf7'.E0uLL;
-    \\  const int num = 0xULl;
-    \\  /*const char ch = '\\';
-    \\  printf("hello, %s", "world");
-    \\}
-;
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
@@ -28,13 +9,23 @@ pub fn main() !void {
 
     try args(alloc);
 
-    // var lexer = lex.Lexer.init(alloc, demo_source, "demo.c");
-    var lexer = try lex.FileLexer.init(alloc, "/home/raul/Downloads/git/dwm/drw.h");
+    // var lexer = try lex.FileLexer.init(alloc, "/home/raul/Downloads/git/dwm/dwm.c");
+    var lexer = try lex.FileLexer.init(alloc, "/home/raul/dev/interpreter/src/example.c");
     defer lexer.deinit();
 
     const stdout = std.io.getStdOut().writer();
     while (try lexer.next()) |token| {
         try stdout.print("{}\n", .{token.token});
+
+        // NOTE: Clean up the allocated string literals as we aren't yet using
+        // the tokens for any other compilation stages.
+        if (token.token == .literal_str) {
+            switch (token.token.literal_str) {
+                .utf8, .char => |str| alloc.free(str),
+                .utf16 => |str| alloc.free(str),
+                .utf32, .wchar => |str| alloc.free(str),
+            }
+        }
     }
     try stdout.writeAll("EoF\n");
 }

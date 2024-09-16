@@ -26,6 +26,10 @@ pub const FileLexer = struct {
         // NOTE: I'm only using mmap so I don't need to load the whole file into memory
         // manually. The kernel can inteligently manage loading/unloading of pages,
         // and I still get a contiguous slice
+        // TODO: Crunching the numbers, a one million line file would only take
+        // about 40MB which honestly is nothing. I could easily load it whole into
+        // memory and not care about it. I could also do some char replacements
+        // that would make lexing a lot simpler, like tabs and newlines.
         const file = try std.fs.openFileAbsolute(absolute_path, .{});
         const md = try file.metadata();
         const ptr = try std.posix.mmap(null, md.size(), std.posix.PROT.READ, .{ .TYPE = .SHARED }, file.handle, 0);
@@ -66,6 +70,7 @@ pub const Lexer = struct {
     first_on_line: bool = true, // TODO: for macros
 
     writer: std.fs.File.Writer,
+    alloc: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     logs: std.ArrayListUnmanaged(LogRecord),
 
@@ -92,6 +97,7 @@ pub const Lexer = struct {
             .source = source,
             .filename = filename,
             .writer = writer,
+            .alloc = alloc,
             .arena = std.heap.ArenaAllocator.init(alloc),
             .logs = std.ArrayListUnmanaged(LogRecord){},
         };
@@ -128,11 +134,11 @@ pub const Lexer = struct {
             }
         }
 
-        for (self.logs.items) |rec| {
-            try self.log(rec);
-        }
-        _ = self.arena.reset(.retain_capacity);
+        var iter = std.mem.reverseIterator(self.logs.items);
+        while (iter.next()) |rec| try self.log(rec);
+        // for (self.logs.items) |rec| try self.log(rec);
         self.logs.clearAndFree(self.arena.allocator());
+        _ = self.arena.reset(.retain_capacity);
 
         return LocToken{
             .line_nr = self.line_nr + 1,
@@ -240,19 +246,204 @@ pub const Lexer = struct {
         return null;
     }
 
-    // TODO:
+    /// This returns an owned slice with the proccessed string bytes. The caller owns the memory.
     fn literalStr(self: *Self) !?Token {
         if (self.match('"')) {
-            if (std.mem.indexOfScalarPos(u8, self.source, self.idx, '"')) |end_idx| {
-                self.idx = @intCast(end_idx + 1);
-            } else {
-                const end_idx = std.mem.indexOfAnyPos(u8, self.source, self.idx, "\r\n");
-                self.idx = @intCast(end_idx orelse self.source.len);
-                try self.err("missing terminating \" character", null, .{});
-            }
-            return Token{ .literal_str = self.tokenStr() };
+            return Token{ .literal_str = .{ .char = try self.literalStrImpl(u8) } };
+        }
+        if (self.match("u8\"")) {
+            return Token{ .literal_str = .{ .utf8 = try self.literalStrImpl(u8) } };
+        }
+        if (self.match("u\"")) {
+            return Token{ .literal_str = .{ .utf16 = try self.literalStrImpl(u16) } };
+        }
+        if (self.match("U\"")) {
+            return Token{ .literal_str = .{ .utf32 = try self.literalStrImpl(u32) } };
+        }
+        if (self.match("L\"")) {
+            // FIXME: For whatever-the-fuck reason `wchar_t` on Windows is only 16 bits wide
+            return Token{ .literal_str = .{ .wchar = try self.literalStrImpl(u32) } };
         }
         return null;
+    }
+
+    fn literalStrImpl(self: *Self, comptime T: type) ![]const T {
+        const max_value = (1 << @bitSizeOf(T)) - 1;
+        var result = std.ArrayList(T).init(self.alloc);
+        defer result.deinit();
+
+        while (self.idx < self.source.len) {
+            const seq_start = self.idx;
+            if (self.match('"')) {
+                break;
+            }
+            if (self.match("\\\n")) {
+                continue;
+            }
+            if (self.peek('\n')) {
+                try self.err("missing terminating \" character", null, .{});
+                break;
+            }
+            if (try self.escapeSequence()) |seq| {
+                switch (seq.kind) {
+                    .hex, .octal => {
+                        if (seq.num > max_value) {
+                            try self.warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
+                            try result.append(@truncate(0xffff_ffff));
+                        } else {
+                            try result.append(@truncate(seq.num));
+                        }
+                    },
+                    .utf16, .utf32 => try self.unicodeEncode(T, seq.num, &result, seq_start),
+                    .simple => try result.append(@truncate(seq.num)),
+                }
+            } else {
+                const len = try std.unicode.utf8ByteSequenceLength(self.source[self.idx]);
+                self.idx += len;
+                const source = self.source[seq_start..self.idx];
+                const ch = try std.unicode.utf8Decode(source);
+                try self.unicodeEncode(T, @intCast(ch), &result, seq_start);
+            }
+        }
+        // NOTE: Don't include the null terminator as that will be added by the
+        // preprocessor after string concatenation.
+        return result.toOwnedSlice();
+    }
+
+    const EscapeKind = enum { simple, octal, hex, utf16, utf32 };
+    const EscapeSequenceResult = struct {
+        kind: EscapeKind,
+        num: u32,
+    };
+
+    fn escapeSequence(self: *Self) !?EscapeSequenceResult {
+        const seq_start = self.idx;
+
+        if (self.match('\\')) {
+            simple: {
+                const num: u8 = switch (self.source[self.idx]) {
+                    '\'' => 0x27,
+                    '"' => 0x22,
+                    '?' => 0x3f,
+                    '\\' => 0x5c,
+                    'a' => 0x07,
+                    'b' => 0x08,
+                    'f' => 0x0c,
+                    'n' => 0x0a,
+                    'r' => 0x0d,
+                    't' => 0x09,
+                    'v' => 0x0b,
+                    else => break :simple,
+                };
+                self.idx += 1;
+                return .{ .kind = .simple, .num = num };
+            }
+            numeric: {
+                const kind: EscapeKind = blk: {
+                    if (self.peek(util.octal)) break :blk .octal;
+                    if (self.match('x')) break :blk .hex;
+                    if (self.match('u')) break :blk .utf16;
+                    if (self.match('U')) break :blk .utf32;
+                    break :numeric;
+                };
+                const digits_start = self.idx;
+
+                var len = @as(u8, 0);
+                if (kind == .octal) {
+                    while (self.match(util.octal)) len += 1;
+                } else {
+                    while (self.match(util.hex)) len += 1;
+                }
+                switch (kind) {
+                    .octal => if (len > 3) {
+                        try self.err("octal escape sequence must have at most 3 digits", seq_start, .{});
+                    },
+                    .utf16 => if (len != 4) {
+                        try self.err("universal character name must have exactly 4 digits", seq_start, .{});
+                    },
+                    .utf32 => if (len != 8) {
+                        try self.err("universal character name must have exactly 8 digits", seq_start, .{});
+                    },
+                    .simple, .hex => {},
+                }
+
+                const base: u8 = if (kind == .octal) 8 else 16;
+                const source = self.source[digits_start..self.idx];
+                var num = @as(u32, 0);
+
+                for (source) |ch| {
+                    const digit = std.fmt.charToDigit(ch, base) catch break;
+                    num *%= base;
+                    num +%= digit;
+                }
+                return .{ .kind = kind, .num = num };
+            }
+            const unknown_seq = self.source[seq_start..(self.idx + 1)];
+            try self.err("unknown escape sequence '{s}'", seq_start, .{unknown_seq});
+            return .{ .kind = .simple, .num = 0xff };
+        }
+        return null;
+    }
+
+    fn unicodeEncode(
+        self: *Self,
+        comptime T: type,
+        ch: u32,
+        out: *std.ArrayList(T),
+        seq_start: u32,
+    ) !void {
+        switch (T) {
+            u8 => utf8Encode(ch, out) catch |err_| {
+                if (err_ == error.CodepointTooLarge) {
+                    try self.warn("codepoint outside the UCS codespace", seq_start, .{});
+                }
+            },
+            u16 => utf16Encode(ch, out) catch |err_| {
+                if (err_ == error.CodepointTooLarge) {
+                    try self.warn("codepoint outside the UCS codespace", seq_start, .{});
+                }
+            },
+            u32 => try out.append(ch),
+            else => @compileError("unexpected char type " ++ @typeName(T)),
+        }
+    }
+
+    fn utf8Encode(cp: u32, out: *std.ArrayList(u8)) !void {
+        const utf8SeqLen = std.unicode.utf8CodepointSequenceLength;
+        const length = try utf8SeqLen(@truncate(@min(cp, 0x10_ffff)));
+        switch (length) {
+            1 => try out.append(@intCast(cp)), // Can just do 0 + codepoint for initial range
+            2 => {
+                try out.append(@intCast(0b11000000 | (cp >> 6)));
+                try out.append(@intCast(0b10000000 | (cp & 0b111111)));
+            },
+            3 => {
+                try out.append(@intCast(0b11100000 | (cp >> 12)));
+                try out.append(@intCast(0b10000000 | ((cp >> 6) & 0b111111)));
+                try out.append(@intCast(0b10000000 | (cp & 0b111111)));
+            },
+            4 => {
+                try out.append(@intCast(0b11110000 | (cp >> 18)));
+                try out.append(@intCast(0b10000000 | ((cp >> 12) & 0b111111)));
+                try out.append(@intCast(0b10000000 | ((cp >> 6) & 0b111111)));
+                try out.append(@intCast(0b10000000 | (cp & 0b111111)));
+            },
+            else => unreachable,
+        }
+    }
+
+    fn utf16Encode(cp: u32, out: *std.ArrayList(u16)) !void {
+        const utf16SeqLen = std.unicode.utf16CodepointSequenceLength;
+        const length = try utf16SeqLen(@truncate(@min(cp, 0x10_ffff)));
+        switch (length) {
+            1 => try out.append(@intCast(cp)), // Can just do 0 + codepoint for initial range
+            2 => {
+                const lead_offset = 0xD800 - (0x10000 >> 10);
+                try out.append(@intCast(lead_offset + (cp >> 10)));
+                try out.append(@intCast(0xDC00 + (cp & 0x3FF)));
+            },
+            else => unreachable,
+        }
     }
 
     // TODO:
