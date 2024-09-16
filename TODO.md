@@ -5,6 +5,7 @@
 [x] Improve the literal float token.
 [x] Investigate if a top-down descent approach would be better for the lexer.
 [x] Allocate literal strings and parse control sequences out of them.
+[x] Fix bug where identifiers can't start with keywords.
 [ ] Add complete char literal lexing.
 [ ] Fix unicode rendering issues for log messages.
 [ ] Change mmap to manually coping the input file into memory. Replace tabs, newlines etc. with a standard set of chars.

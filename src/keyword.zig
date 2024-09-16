@@ -70,18 +70,7 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
         }
 
         fn compare(_: void, lhs: []const u8, rhs: KeywordData) std.math.Order {
-            const n = @min(lhs.len, rhs.str.len);
-            for (lhs[0..n], rhs.str[0..n]) |lhselem, rhselem| {
-                switch (std.math.order(lhselem, rhselem)) {
-                    .eq => continue,
-                    .lt => return .lt,
-                    .gt => return .gt,
-                }
-            }
-            switch (std.math.order(lhs.len, rhs.str.len)) {
-                .lt => return .lt,
-                .eq, .gt => return .eq,
-            }
+            return std.mem.order(u8, lhs, rhs.str);
         }
     };
 

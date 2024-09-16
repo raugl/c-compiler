@@ -118,14 +118,12 @@ pub const Lexer = struct {
 
         // NOTE: The order matters
         const token =
-            self.literalBool() orelse
-            self.keyword() orelse
-            self.identifier() orelse
             self.preproc() orelse
             try self.comment() orelse
             try self.literalStr() orelse
             try self.literalChar() orelse
             try self.literalNumeric() orelse
+            self.alphabetic() orelse
             self.operator();
 
         if (token == null) {
@@ -172,19 +170,20 @@ pub const Lexer = struct {
         }
     }
 
-    fn literalBool(self: *Self) ?Token {
-        if (self.match("true")) {
-            return Token{ .literal_bool = true };
-        }
-        if (self.match("false")) {
-            return Token{ .literal_bool = false };
-        }
-        return null;
-    }
-
-    fn identifier(self: *Self) ?Token {
+    fn alphabetic(self: *Self) ?Token {
         if (self.match('_') or self.match(util.alphabetic)) {
             while (self.match('_') or self.match(util.alphaNumeric)) {}
+            const source = self.source[self.token_start..self.idx];
+
+            if (std.mem.eql(u8, source, "true")) {
+                return Token{ .literal_bool = true };
+            }
+            if (std.mem.eql(u8, source, "false")) {
+                return Token{ .literal_bool = false };
+            }
+            if (kw.parseKeyword(source)) |res| {
+                return Token{ .keyword = res.kw };
+            }
             return Token{ .identifier = self.tokenStr() };
         }
         return null;
@@ -207,13 +206,6 @@ pub const Lexer = struct {
             return Token{ .comment = self.tokenStr() };
         }
         return null;
-    }
-
-    fn keyword(self: *Self) ?Token {
-        const source = self.source[self.idx..];
-        const res = kw.parseKeyword(source) orelse return null;
-        self.idx += res.len;
-        return Token{ .keyword = res.kw };
     }
 
     fn operator(self: *Self) ?Token {
