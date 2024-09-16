@@ -27,6 +27,10 @@
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.9.1.tar.gz",
             .hash = "122062d301a203d003547b414237229b09a7980095061697349f8bef41be9c30266b",
         },
+        .@"zig-wcwidth" = .{
+            .url = "https://github.com/joachimschmidt557/zig-wcwidth/archive/5dbd6f0.tar.gz",
+            .hash = "12204241bc4f9b62c2f11e017e6b7ae3103a39d2c609018d82d2e37f090268126cff",
+        },
     },
     .paths = .{
         "build.zig",

@@ -3,6 +3,7 @@ const util = @import("util.zig");
 const kw = @import("keyword.zig");
 const op = @import("operator.zig");
 const tk = @import("token.zig");
+const wc = @import("wcwidth");
 
 const Token = tk.Token;
 const LocToken = tk.LocToken;
@@ -65,7 +66,7 @@ pub const Lexer = struct {
     idx: u32 = 0,
     line_start: u32 = 0,
     token_start: u32 = 0,
-    line_nr: u16 = 0,
+    line_nr: u16 = 1,
     had_errors: bool = false,
     first_on_line: bool = true, // TODO: for macros
 
@@ -137,12 +138,14 @@ pub const Lexer = struct {
         var iter = std.mem.reverseIterator(self.logs.items);
         while (iter.next()) |rec| try self.log(rec);
         // for (self.logs.items) |rec| try self.log(rec);
+
         self.logs.clearAndFree(self.arena.allocator());
         _ = self.arena.reset(.retain_capacity);
 
+        const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
         return LocToken{
-            .line_nr = self.line_nr + 1,
-            .col_nr = @intCast(self.token_start - self.line_start + 1),
+            .line_nr = self.line_nr,
+            .col_nr = @as(u16, @intCast(col_nr)) + 1,
             .token = token orelse return null,
         };
     }
@@ -876,37 +879,36 @@ pub const Lexer = struct {
 
     // FIXME: tabs break this
     fn log(self: Self, rec: LogRecord) !void {
-        const column = self.token_start - self.line_start;
-        try self.writer.print(esc.bold ++ "{[file]s}:{[row_nr]}:{[col_nr]}: {[color]s}{[severity]s}:" ++ esc.reset ++ " {[msg]s}\n", .{
-            .file = self.filename,
-            .row_nr = self.line_nr + 1,
-            .col_nr = column + 1,
-            .msg = rec.msg,
-            .color = rec.color,
-            .severity = rec.severity,
-        });
+        const line_end = std.mem.indexOfScalarPos(u8, self.source, self.token_start, '\n') orelse self.source.len;
+        const color_end = @min(self.idx, line_end);
 
-        const line_end = std.mem.indexOfAnyPos(u8, self.source, self.token_start, "\r\n") orelse self.source.len;
-        const line = self.source[self.line_start..line_end];
-        const hgl_start = column; // highlight start
-        const hgl_end = @min(line_end, self.idx) - self.line_start;
-        try self.writer.print("{[row_nr]:>5} | {[pre]s}{[color]s}{[highlight]s}" ++ esc.reset ++ "{[post]s}\n", .{
-            .row_nr = self.line_nr + 1,
-            .pre = line[0..hgl_start],
-            .highlight = line[hgl_start..hgl_end],
-            .post = line[hgl_end..],
-            .color = rec.color,
-        });
+        const pre_color = self.source[self.line_start..self.token_start];
+        const colored = self.source[self.token_start..color_end];
+        const aft_color = self.source[color_end..line_end];
+        const pad_len = try wc.sliceWidth(pre_color);
+        const col_nr = pad_len + 1;
 
-        const tabs = std.mem.count(u8, line, "\t") * 7; // assume 8-wide tabs in the terminal
-        const caret = (rec.idx orelse self.token_start) - self.line_start;
+        try self.writer.print(
+            esc.bold ++ "{s}:{}:{}: {s}{s}:" ++ esc.reset ++ " {s}\n",
+            .{ self.filename, self.line_nr, col_nr, rec.color, rec.severity, rec.msg },
+        );
+
+        try self.writer.print(
+            "{:>5} | {s}{s}{s}" ++ esc.reset ++ "{s}\n",
+            .{ self.line_nr, pre_color, rec.color, colored, aft_color },
+        );
+
         const padding = " " ** 256;
         const squirly = "~" ** 256;
-        try self.writer.print("      | {[padding]s}{[color]s}{[pre]s}^{[post]s}" ++ esc.reset ++ "\n", .{
-            .padding = padding[0..(hgl_start + tabs)],
-            .pre = squirly[0..(caret - hgl_start)],
-            .post = squirly[0..(hgl_end - caret -| 1)],
-            .color = rec.color,
+        const caret_idx = rec.idx orelse self.token_start;
+        const pre_caret_len = try wc.sliceWidth(self.source[self.token_start..caret_idx]);
+        const aft_caret_len = try wc.sliceWidth(self.source[caret_idx..color_end]) - 1;
+
+        try self.writer.print("      | {s}{s}{s}^{s}" ++ esc.reset ++ "\n", .{
+            padding[0..@intCast(pad_len)],
+            rec.color,
+            squirly[0..@intCast(pre_caret_len)],
+            squirly[0..@intCast(aft_caret_len)],
         });
     }
 };
@@ -979,17 +981,17 @@ test "consumeWhitespace" {
     defer lexer.deinit();
 
     try expectEqualToken(1, 3, .{ .identifier = "foo" }, lexer.next());
-    try expectEqualIdxs(0, 0, 2, 5, lexer);
+    try expectEqualIdxs(1, 0, 2, 5, lexer);
 
     try expectEqualToken(1, 7, .{ .identifier = "bar" }, lexer.next());
-    try expectEqualIdxs(0, 0, 6, 9, lexer);
+    try expectEqualIdxs(1, 0, 6, 9, lexer);
 
     try expectEqualToken(2, 2, .{ .identifier = "foo" }, lexer.next());
-    try expectEqualIdxs(1, 10, 11, 14, lexer);
+    try expectEqualIdxs(2, 10, 11, 14, lexer);
 
     try expectEqualToken(2, 12, .{ .identifier = "bar" }, lexer.next());
-    try expectEqualIdxs(1, 10, 21, 24, lexer);
+    try expectEqualIdxs(2, 10, 21, 24, lexer);
 
     try expectEqualToken(3, 2, .{ .comment = "/*\n  *\n  */" }, lexer.next());
-    try expectEqualIdxs(2, 25, 26, 37, lexer);
+    try expectEqualIdxs(3, 25, 26, 37, lexer);
 }

@@ -18,6 +18,12 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("clap", clap.module("clap"));
 
+    const wcwidth = b.dependency("zig-wcwidth", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("wcwidth", wcwidth.module("wcwidth"));
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {

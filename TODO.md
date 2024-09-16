@@ -8,7 +8,7 @@
 [x] `consumeWhitespace()` gets stuck on newline escapes.
 [x] Fix bug where identifiers can't start with keywords.
 [x] Implement complete char literal lexing.
-[ ] Fix unicode rendering issues for log messages.
+[x] Fix unicode rendering issues for log messages.
 [ ] Change mmap to manually coping the input file into memory. Replace tabs, newlines etc. with a standard set of chars.
 [ ] Implement preprocessor tokens.
 [ ] Implement the preprocessor.
