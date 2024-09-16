@@ -113,6 +113,8 @@ pub const Lexer = struct {
 
     pub fn next(self: *Self) !?LocToken {
         self.consumeWhitespace();
+        self.token_start = self.idx;
+        defer self.first_on_line = false;
 
         // NOTE: The order matters
         const token =
@@ -149,16 +151,25 @@ pub const Lexer = struct {
 
     // FIXME: This doesn't support stand-alone '\r' as newlines
     fn consumeWhitespace(self: *Self) void {
-        const new_idx = std.mem.indexOfNonePos(u8, self.source, self.idx, &std.ascii.whitespace);
-        self.idx = @intCast(new_idx orelse self.source.len);
+        const control_code = std.ascii.control_code;
 
-        for (self.source[self.token_start..self.idx], 0..) |ch, i| {
-            if (ch == '\n') {
-                self.line_start = self.token_start + @as(u32, @intCast(i + 1));
-                self.line_nr += 1;
+        while (self.idx < self.source.len) {
+            switch (self.source[self.idx]) {
+                '\\' => if (self.match("\\\n")) {
+                    self.first_on_line = true;
+                    self.line_start = self.idx;
+                    self.line_nr += 1;
+                },
+                '\n' => {
+                    self.idx += 1;
+                    self.first_on_line = true;
+                    self.line_start = self.idx;
+                    self.line_nr += 1;
+                },
+                ' ', '\t', '\r', control_code.vt, control_code.ff => self.idx += 1,
+                else => break,
             }
         }
-        self.token_start = self.idx;
     }
 
     fn literalBool(self: *Self) ?Token {
