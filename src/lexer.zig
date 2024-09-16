@@ -449,19 +449,100 @@ pub const Lexer = struct {
         }
     }
 
-    // TODO:
     fn literalChar(self: *Self) !?Token {
-        if (self.match("'")) {
-            if (std.mem.indexOfScalarPos(u8, self.source, self.idx, '\'')) |end_idx| {
-                self.idx = @intCast(end_idx + 1);
-            } else {
-                const end_idx = std.mem.indexOfAnyPos(u8, self.source, self.idx, "\r\n");
-                self.idx = @intCast(end_idx orelse self.source.len);
-                try self.err("missing terminating ' character", null, .{});
-            }
-            return Token{ .literal_str = self.tokenStr() };
-        }
+        if (self.match("'")) return try self.literalCharImpl(u8, .char);
+        if (self.match("u8'")) return try self.literalCharImpl(u8, .utf8);
+        if (self.match("u'")) return try self.literalCharImpl(u16, .utf16);
+        if (self.match("U'")) return try self.literalCharImpl(u32, .utf32);
+        // FIXME: For whatever-the-fuck reason `wchar_t` on Windows is only 16 bits wide
+        if (self.match("L'")) return try self.literalCharImpl(u32, .wchar);
         return null;
+    }
+
+    fn literalCharImpl(self: *Self, comptime T: type, comptime kind: CharKind) !Token {
+        var result = @as(u32, 0);
+        var num_chars = @as(u8, 0);
+        const max_value = (1 << @bitSizeOf(T)) - 1;
+
+        while (self.idx < self.source.len) {
+            const seq_start = self.idx;
+            if (self.match("'")) {
+                break;
+            }
+            if (self.match("\\\n")) {
+                continue;
+            }
+            if (self.peek('\n')) {
+                try self.err("missing terminating ' character", null, .{});
+                break;
+            }
+            if (try self.escapeSequence()) |seq| {
+                switch (seq.kind) {
+                    .hex, .octal => if (seq.num > max_value) {
+                        try self.warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
+                    },
+                    .utf16, .utf32 => if (seq.num > max_value) {
+                        try self.warn("character literal too large for its type", seq_start, .{});
+                    },
+                    .simple => {},
+                }
+                switch (kind) {
+                    .char => {
+                        if (num_chars == 1) {
+                            try self.warn("using multi-character character literal", null, .{});
+                        }
+                        if (num_chars == 4) {
+                            try self.warn("character literal too long for its type", null, .{});
+                        }
+                    },
+                    .utf8, .utf16, .utf32 => if (num_chars == 1) {
+                        try self.err("unicode character literal may not contain multiple characters", seq_start, .{});
+                    },
+                    .wchar => if (num_chars == 1) {
+                        try self.err("wide character literal may not contain multiple characters", seq_start, .{});
+                    },
+                }
+                accumChar(&result, @min(seq.num, max_value), kind);
+                num_chars += 1;
+            } else {
+                const len = try std.unicode.utf8ByteSequenceLength(self.source[self.idx]);
+                self.idx += len;
+                const source = self.source[seq_start..self.idx];
+                const cp = try std.unicode.utf8Decode(source);
+                if (cp > max_value) {
+                    try self.warn("character literal too large for its type", seq_start, .{});
+                }
+                accumChar(&result, @min(cp, max_value), kind);
+                num_chars += 1;
+            }
+        }
+        return switch (kind) {
+            .char => Token{ .literal_int = .{
+                .value = result,
+                .width = 32,
+                .signed = true,
+            } },
+            .utf8, .utf16, .utf32, .wchar => Token{ .literal_int = .{
+                .value = result,
+                .width = @bitSizeOf(T),
+                .signed = false,
+            } },
+        };
+    }
+
+    const CharKind = enum { char, wchar, utf8, utf16, utf32 };
+
+    fn accumChar(num: *u32, ch: u32, comptime kind: CharKind) void {
+        // The behaviour for multi-character literals is unspecified, so I chose
+        // to follow clang/gcc's behaviour as described here:
+        // https://en.cppreference.com/w/c/language/character_constant#Notes
+        switch (kind) {
+            .char => {
+                num.* <<= @bitSizeOf(u8);
+                num.* += @as(u8, @intCast(ch));
+            },
+            .wchar, .utf8, .utf16, .utf32 => num.* = ch,
+        }
     }
 
     fn literalNumeric(self: *Self) !?Token {
@@ -762,7 +843,7 @@ pub const Lexer = struct {
         const reset = "\x1b[m";
     };
 
-    fn note(self: Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
+    fn note(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
         const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
         try self.logs.append(self.arena.allocator(), .{
             .msg = msg,
@@ -772,7 +853,7 @@ pub const Lexer = struct {
         });
     }
 
-    fn warn(self: Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
+    fn warn(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
         const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
         try self.logs.append(self.arena.allocator(), .{
             .msg = msg,
