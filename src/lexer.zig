@@ -1,13 +1,13 @@
 const std = @import("std");
 const wc = @import("wcwidth");
 const util = @import("util.zig");
-const kw = @import("keyword.zig");
-const op = @import("operator.zig");
 const tk = @import("token.zig");
 
 const Token = tk.Token;
 const LocToken = tk.LocToken;
 
+const parseKeyword = @import("keyword.zig").parseKeyword;
+const parseOperator = @import("operator.zig").parseOperator;
 const parseDirective = @import("preproc.zig").parseDirective;
 
 pub const Lexer = struct {
@@ -194,11 +194,11 @@ pub const Lexer = struct {
             while (self.match('_') or self.match(util.alphaNumeric)) {}
             const source = self.source[self.token_start..self.idx];
 
-            if (kw.parseKeyword(source)) |res| {
-                return switch (res.kw) {
+            if (parseKeyword(source)) |keyword| {
+                return switch (keyword) {
                     .true => Token{ .literal_bool = true },
                     .false => Token{ .literal_bool = false },
-                    else => Token{ .keyword = res.kw },
+                    else => Token{ .keyword = keyword },
                 };
             }
             // TODO: Identifiers should also contain unicode escapes and emoji:
@@ -228,7 +228,7 @@ pub const Lexer = struct {
 
     fn operator(self: *Self) ?Token {
         const source = self.source[self.idx..];
-        const res = op.parseOperator(source) orelse return null;
+        const res = parseOperator(source) orelse return null;
         self.idx += res.len;
         return Token{ .operator = res.op };
     }

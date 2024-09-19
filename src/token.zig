@@ -1,6 +1,6 @@
 const std = @import("std");
-const kw = @import("keyword.zig");
-const op = @import("operator.zig");
+const Keyword = @import("keyword.zig").Keyword;
+const Operator = @import("operator.zig").Operator;
 const Directive = @import("preproc.zig").Directive;
 
 /// Wrapper around `Token` that include source location information
@@ -32,8 +32,8 @@ pub const Token = union(enum) {
         utf32: []const u32,
         wchar: []const u32, // FIXME: For whatever-the-fuck reason `wchar_t` on Windows is only 16 bits wide
     },
-    keyword: kw.Keyword,
-    operator: op.Operator,
+    keyword: Keyword,
+    operator: Operator,
     preproc: Directive,
 
     // BUG: This crashes if the printed unicode codepoint is invalid. It would also be nice to re-escape special chars
@@ -94,8 +94,8 @@ pub const Token = union(enum) {
             },
             .comment => |body| try writer.print("comment: {s}", .{body}),
             .identifier => |name| try writer.print("identifier: \"{s}\"", .{name}),
-            .keyword => |keyword| try writer.print("keyword.{s}", .{kw.format(keyword)}),
-            .operator => |operator| try writer.print("operator: \"{s}\"", .{op.format(operator)}),
+            .keyword => |keyword| try writer.print("keyword.{}", .{keyword}),
+            .operator => |operator| try writer.print("operator: \"{}\"", .{operator}),
             .preproc => |preproc| try writer.print("preproc.{}", .{preproc}),
         }
     }

@@ -60,17 +60,85 @@ pub const Keyword = enum {
     _Noreturn,
     _Static_assert,
     _Thread_local,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = .{ fmt, options };
+
+        const str = switch (self) {
+            .alignas => "alignas",
+            .alignof => "alignof",
+            .auto => "auto",
+            .bool => "bool",
+            .break_ => "break",
+            .case => "case",
+            .char => "char",
+            .const_ => "const",
+            .constexpr => "constexpr",
+            .continue_ => "continue",
+            .default => "default",
+            .do => "do",
+            .double => "double",
+            .else_ => "else",
+            .enum_ => "enum",
+            .extern_ => "extern",
+            .false => "false",
+            .float => "float",
+            .for_ => "for",
+            .goto => "goto",
+            .if_ => "if",
+            .inline_ => "inline",
+            .int => "int",
+            .long => "long",
+            .nullptr => "nullptr",
+            .register => "register",
+            .restrict => "restrict",
+            .return_ => "return",
+            .short => "short",
+            .signed => "signed",
+            .sizeof => "sizeof",
+            .static => "static",
+            .static_assert => "static_assert",
+            .struct_ => "struct",
+            .switch_ => "switch",
+            .thread_local => "thread_local",
+            .true => "true",
+            .typedef => "typedef",
+            .typeof => "typeof",
+            .typeof_unqual => "typeof_unqual",
+            .union_ => "union",
+            .unsigned => "unsigned",
+            .void => "void",
+            .volatile_ => "volatile",
+            .while_ => "while",
+            ._Alignas => "_Alignas",
+            ._Alignof => "_Alignof",
+            ._Atomic => "_Atomic",
+            ._BitInt => "_BitInt",
+            ._Bool => "_Bool",
+            ._Complex => "_Complex",
+            ._Decimal32 => "_Decimal32",
+            ._Decimal64 => "_Decimal64",
+            ._Decimal128 => "_Decimal128",
+            ._Generic => "_Generic",
+            ._Imaginary => "_Imaginary",
+            ._Noreturn => "_Noreturn",
+            ._Static_assert => "_Static_assert",
+            ._Thread_local => "_Thread_local",
+        };
+        try writer.writeAll(str);
+    }
 };
 
-pub const ParseResult = struct {
-    kw: Keyword,
-    len: u32,
-};
-
+// FIXME: This description is no longer true
 /// Accepts any string and parses a keyword from its beginning up to however long
 /// the potential keyword is. It returns the parsed length, so you don't need to
 /// specify the precise keyword length when calling it.
-pub fn parseKeyword(str: []const u8) ?ParseResult {
+pub fn parseKeyword(str: []const u8) ?Keyword {
     const KeywordData = struct {
         str: []const u8,
         kw: Keyword,
@@ -155,83 +223,16 @@ pub fn parseKeyword(str: []const u8) ?ParseResult {
     };
 
     if (std.sort.binarySearch(KeywordData, str, &keywords, {}, Fn.compare)) |idx| {
-        return ParseResult{
-            .kw = keywords[idx].kw,
-            .len = @intCast(keywords[idx].str.len),
-        };
+        return keywords[idx].kw;
     }
     return null;
 }
 
 test "parseKeyword" {
     const expectEqual = std.testing.expectEqual;
-    try expectEqual(ParseResult{ .kw = .if_, .len = 2 }, parseKeyword("if"));
-    try expectEqual(ParseResult{ .kw = .int, .len = 3 }, parseKeyword("int"));
-    try expectEqual(ParseResult{ .kw = .inline_, .len = 6 }, parseKeyword("inline"));
-    try expectEqual(ParseResult{ .kw = ._Decimal64, .len = 10 }, parseKeyword("_Decimal64"));
-    try expectEqual(ParseResult{ .kw = ._Decimal128, .len = 11 }, parseKeyword("_Decimal128"));
-}
-
-pub fn format(keyword: Keyword) []const u8 {
-    return switch (keyword) {
-        .alignas => "alignas",
-        .alignof => "alignof",
-        .auto => "auto",
-        .bool => "bool",
-        .break_ => "break",
-        .case => "case",
-        .char => "char",
-        .const_ => "const",
-        .constexpr => "constexpr",
-        .continue_ => "continue",
-        .default => "default",
-        .do => "do",
-        .double => "double",
-        .else_ => "else",
-        .enum_ => "enum",
-        .extern_ => "extern",
-        .false => "false",
-        .float => "float",
-        .for_ => "for",
-        .goto => "goto",
-        .if_ => "if",
-        .inline_ => "inline",
-        .int => "int",
-        .long => "long",
-        .nullptr => "nullptr",
-        .register => "register",
-        .restrict => "restrict",
-        .return_ => "return",
-        .short => "short",
-        .signed => "signed",
-        .sizeof => "sizeof",
-        .static => "static",
-        .static_assert => "static_assert",
-        .struct_ => "struct",
-        .switch_ => "switch",
-        .thread_local => "thread_local",
-        .true => "true",
-        .typedef => "typedef",
-        .typeof => "typeof",
-        .typeof_unqual => "typeof_unqual",
-        .union_ => "union",
-        .unsigned => "unsigned",
-        .void => "void",
-        .volatile_ => "volatile",
-        .while_ => "while",
-        ._Alignas => "_Alignas",
-        ._Alignof => "_Alignof",
-        ._Atomic => "_Atomic",
-        ._BitInt => "_BitInt",
-        ._Bool => "_Bool",
-        ._Complex => "_Complex",
-        ._Decimal32 => "_Decimal32",
-        ._Decimal64 => "_Decimal64",
-        ._Decimal128 => "_Decimal128",
-        ._Generic => "_Generic",
-        ._Imaginary => "_Imaginary",
-        ._Noreturn => "_Noreturn",
-        ._Static_assert => "_Static_assert",
-        ._Thread_local => "_Thread_local",
-    };
+    try expectEqual(.if_, parseKeyword("if"));
+    try expectEqual(.int, parseKeyword("int"));
+    try expectEqual(.inline_, parseKeyword("inline"));
+    try expectEqual(._Decimal64, parseKeyword("_Decimal64"));
+    try expectEqual(._Decimal128, parseKeyword("_Decimal128"));
 }
