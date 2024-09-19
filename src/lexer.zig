@@ -109,14 +109,19 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Self) !?LocToken {
+        var arena_buffer: [4096]u8 = undefined;
+        var buf_alloc = std.heap.FixedBufferAllocator.init(&arena_buffer);
+        var arena = std.heap.ArenaAllocator.init(buf_alloc.allocator());
+        defer arena.deinit();
+
+        self.arena_alloc = arena.allocator();
         self.consumeWhitespace();
         self.token_start = self.idx;
-        defer self.first_on_line = false;
 
         // NOTE: The order matters
         const token =
             self.preproc() orelse
-            try self.comment() orelse
+            self.comment() orelse
             try self.literalStr() orelse
             try self.literalChar() orelse
             try self.literalNumeric() orelse
@@ -125,24 +130,22 @@ pub const Lexer = struct {
 
         if (token == null) {
             const source = self.source[self.idx..];
-            if (std.mem.indexOfNone(u8, source, &std.ascii.whitespace) != null) {
-                self.idx += @intCast(std.mem.indexOfAny(u8, source, "\r\n") orelse self.source.len);
-                try self.err("invalid bytes", null, .{});
+            if (std.mem.indexOfNone(u8, source, &std.ascii.whitespace)) |_| {
+                self.idx += @intCast(std.mem.indexOfScalar(u8, source, '\n') orelse source.len);
+                self.Error("invalid bytes", null, .{});
             }
+            try self.flushLogs();
+            return null;
         }
 
-        var iter = std.mem.reverseIterator(self.logs.items);
-        while (iter.next()) |rec| try self.log(rec);
-        // for (self.logs.items) |rec| try self.log(rec);
-
-        self.logs.clearAndFree(self.arena.allocator());
-        _ = self.arena.reset(.retain_capacity);
+        try self.flushLogs();
+        self.first_on_line = false;
 
         const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
         return LocToken{
             .line_nr = self.line_nr,
             .col_nr = @as(u16, @intCast(col_nr)) + 1,
-            .token = token orelse return null,
+            .token = token.?,
         };
     }
 
@@ -169,6 +172,12 @@ pub const Lexer = struct {
         }
     }
 
+    fn flushLogs(self: *Self) !void {
+        var iter = std.mem.reverseIterator(self.log_records.items);
+        while (iter.next()) |rec| try self.log(rec);
+        self.log_records.clearAndFree(self.arena_alloc);
+    }
+
     fn alphabetic(self: *Self) ?Token {
         if (self.match('_') or self.match(util.alphabetic)) {
             while (self.match('_') or self.match(util.alphaNumeric)) {}
@@ -188,11 +197,10 @@ pub const Lexer = struct {
         return null;
     }
 
-    fn comment(self: *Self) !?Token {
+    fn comment(self: *Self) ?Token {
         if (self.match("//")) {
             const source = self.source[self.idx..];
-            const len = std.mem.indexOfAny(u8, source, "\r\n") orelse source.len;
-            self.idx += @intCast(len);
+            self.idx += @intCast(std.mem.indexOfScalar(u8, source, '\n') orelse source.len);
             return Token{ .comment = self.tokenStr() };
         }
         if (self.match("/*")) {
@@ -201,7 +209,7 @@ pub const Lexer = struct {
                 return Token{ .comment = self.tokenStr() };
             }
             self.idx = @intCast(self.source.len);
-            try self.err("unterminated block comment", null, .{});
+            self.Error("unterminated block comment", null, .{});
             return Token{ .comment = self.tokenStr() };
         }
         return null;
@@ -283,14 +291,14 @@ pub const Lexer = struct {
                 continue;
             }
             if (self.peek('\n')) {
-                try self.err("missing terminating \" character", null, .{});
+                self.Error("missing terminating \" character", null, .{});
                 break;
             }
-            if (try self.escapeSequence()) |seq| {
+            if (self.escapeSequence()) |seq| {
                 switch (seq.kind) {
                     .hex, .octal => {
                         if (seq.num > max_value) {
-                            try self.warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
+                            self.Warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
                             try result.append(@truncate(0xffff_ffff));
                         } else {
                             try result.append(@truncate(seq.num));
@@ -318,7 +326,7 @@ pub const Lexer = struct {
         num: u32,
     };
 
-    fn escapeSequence(self: *Self) !?EscapeSequenceResult {
+    fn escapeSequence(self: *Self) ?EscapeSequenceResult {
         const seq_start = self.idx;
 
         if (self.match('\\')) {
@@ -358,13 +366,13 @@ pub const Lexer = struct {
                 }
                 switch (kind) {
                     .octal => if (len > 3) {
-                        try self.err("octal escape sequence must have at most 3 digits", seq_start, .{});
+                        self.Error("octal escape sequence must have at most 3 digits", seq_start, .{});
                     },
                     .utf16 => if (len != 4) {
-                        try self.err("universal character name must have exactly 4 digits", seq_start, .{});
+                        self.Error("universal character name must have exactly 4 digits", seq_start, .{});
                     },
                     .utf32 => if (len != 8) {
-                        try self.err("universal character name must have exactly 8 digits", seq_start, .{});
+                        self.Error("universal character name must have exactly 8 digits", seq_start, .{});
                     },
                     .simple, .hex => {},
                 }
@@ -381,7 +389,7 @@ pub const Lexer = struct {
                 return .{ .kind = kind, .num = num };
             }
             const unknown_seq = self.source[seq_start..(self.idx + 1)];
-            try self.err("unknown escape sequence '{s}'", seq_start, .{unknown_seq});
+            self.Error("unknown escape sequence '{s}'", seq_start, .{unknown_seq});
             return .{ .kind = .simple, .num = 0xff };
         }
         return null;
@@ -397,12 +405,12 @@ pub const Lexer = struct {
         switch (T) {
             u8 => utf8Encode(ch, out) catch |err_| {
                 if (err_ == error.CodepointTooLarge) {
-                    try self.warn("codepoint outside the UCS codespace", seq_start, .{});
+                    self.Warn("codepoint outside the UCS codespace", seq_start, .{});
                 }
             },
             u16 => utf16Encode(ch, out) catch |err_| {
                 if (err_ == error.CodepointTooLarge) {
-                    try self.warn("codepoint outside the UCS codespace", seq_start, .{});
+                    self.Warn("codepoint outside the UCS codespace", seq_start, .{});
                 }
             },
             u32 => try out.append(ch),
@@ -472,33 +480,33 @@ pub const Lexer = struct {
                 continue;
             }
             if (self.peek('\n')) {
-                try self.err("missing terminating ' character", null, .{});
+                self.Error("missing terminating ' character", null, .{});
                 break;
             }
-            if (try self.escapeSequence()) |seq| {
+            if (self.escapeSequence()) |seq| {
                 switch (seq.kind) {
                     .hex, .octal => if (seq.num > max_value) {
-                        try self.warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
+                        self.Warn("{s} escape sequence out of range", seq_start, .{@tagName(seq.kind)});
                     },
                     .utf16, .utf32 => if (seq.num > max_value) {
-                        try self.warn("character literal too large for its type", seq_start, .{});
+                        self.Warn("character literal too large for its type", seq_start, .{});
                     },
                     .simple => {},
                 }
                 switch (kind) {
                     .char => {
                         if (num_chars == 1) {
-                            try self.warn("using multi-character character literal", null, .{});
+                            self.Warn("using multi-character character literal", null, .{});
                         }
                         if (num_chars == 4) {
-                            try self.warn("character literal too long for its type", null, .{});
+                            self.Warn("character literal too long for its type", null, .{});
                         }
                     },
                     .utf8, .utf16, .utf32 => if (num_chars == 1) {
-                        try self.err("unicode character literal may not contain multiple characters", seq_start, .{});
+                        self.Error("unicode character literal may not contain multiple characters", seq_start, .{});
                     },
                     .wchar => if (num_chars == 1) {
-                        try self.err("wide character literal may not contain multiple characters", seq_start, .{});
+                        self.Error("wide character literal may not contain multiple characters", seq_start, .{});
                     },
                 }
                 accumChar(&result, @min(seq.num, max_value), kind);
@@ -509,7 +517,7 @@ pub const Lexer = struct {
                 const source = self.source[seq_start..self.idx];
                 const cp = try std.unicode.utf8Decode(source);
                 if (cp > max_value) {
-                    try self.warn("character literal too large for its type", seq_start, .{});
+                    self.Warn("character literal too large for its type", seq_start, .{});
                 }
                 accumChar(&result, @min(cp, max_value), kind);
                 num_chars += 1;
@@ -566,7 +574,7 @@ pub const Lexer = struct {
 
     fn literalInt(self: *Self, digitFn: MatchFn) !?Token {
         if (!try self.literalDigitSequence(digitFn)) {
-            try self.err("no digits in literal integer constant", self.idx - 1, .{});
+            self.Error("no digits in literal integer constant", self.idx - 1, .{});
         }
         const value = try util.parseInt(self.tokenStr());
         const suffix = try self.literalIntSuffix() orelse LiteralIntSuffixResult{};
@@ -606,7 +614,7 @@ pub const Lexer = struct {
 
         if (has_extra) {
             const suffix = self.source[start_idx..self.idx];
-            try self.err("invalid suffix \"{s}\" for integer constant", start_idx, .{suffix});
+            self.Error("invalid suffix \"{s}\" for integer constant", start_idx, .{suffix});
         }
         return res;
     }
@@ -674,7 +682,7 @@ pub const Lexer = struct {
             if (self.match('.')) {
                 optional(try self.literalDigitSequence(util.hex));
                 if (!try self.literalFloatExponent(.hex)) {
-                    try self.err("hexadecimal floating constants require an exponent", null, .{});
+                    self.Error("hexadecimal floating constants require an exponent", null, .{});
                 }
                 const value = try util.parseFloat(self.tokenStr());
                 const width = try self.literalFloatSuffix() orelse 64;
@@ -697,10 +705,10 @@ pub const Lexer = struct {
         }
         if (self.match('.')) {
             if (!try self.literalDigitSequence(util.hex)) {
-                try self.err("no digits in hexadecimal floating constant", self.idx - 1, .{});
+                self.Error("no digits in hexadecimal floating constant", self.idx - 1, .{});
             }
             if (!try self.literalFloatExponent(.hex)) {
-                try self.err("hexadecimal floating constants require an exponent", null, .{});
+                self.Error("hexadecimal floating constants require an exponent", null, .{});
             }
             const value = try util.parseFloat(self.tokenStr());
             const width = try self.literalFloatSuffix() orelse 64;
@@ -721,7 +729,7 @@ pub const Lexer = struct {
         if (has_exponent) {
             optional(self.match('+') or self.match('-'));
             if (!try self.literalDigitSequence(util.decimal)) {
-                try self.err("exponent has no digits", self.idx - 1, .{});
+                self.Error("exponent has no digits", self.idx - 1, .{});
             }
         }
         return has_exponent;
@@ -742,14 +750,14 @@ pub const Lexer = struct {
 
         if (has_extra) {
             const suffix = self.source[start_idx..self.idx];
-            try self.err("invalid suffix \"{s}\" for floating constant", start_idx, .{suffix});
+            self.Error("invalid suffix \"{s}\" for floating constant", start_idx, .{suffix});
         }
         return res;
     }
 
     fn literalDigitSequence(self: *Self, digitFn: MatchFn) !bool {
         if (self.match("'")) {
-            try self.err("digit separator outside digit sequence", self.idx - 1, .{});
+            self.Error("digit separator outside digit sequence", self.idx - 1, .{});
         }
         var has_digits = false;
         while (true) {
@@ -758,7 +766,7 @@ pub const Lexer = struct {
             } else if (self.match("'")) {
                 while (self.match("'")) {}
                 if (!self.peek(digitFn)) {
-                    try self.err("digit separator outside digit sequence", self.idx - 1, .{});
+                    self.Error("digit separator outside digit sequence", self.idx - 1, .{});
                     break;
                 }
             } else break;
@@ -841,39 +849,50 @@ pub const Lexer = struct {
         const bold = "\x1b[1m";
         const reset = "\x1b[m";
     };
+    const oom_msg = "lexer's fixed buffer arena allocator ran out of space";
 
-    fn note(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
-        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
-        try self.logs.append(self.arena.allocator(), .{
+    fn Note(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.arena_alloc, fmt, args) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
+        self.log_records.append(self.arena_alloc, .{
             .msg = msg,
             .idx = idx,
             .severity = "note",
             .color = esc.note,
-        });
+        }) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
     }
 
-    fn warn(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
-        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
-        try self.logs.append(self.arena.allocator(), .{
+    fn Warn(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.arena_alloc, fmt, args) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
+        self.log_records.append(self.arena_alloc, .{
             .msg = msg,
             .idx = idx,
             .severity = "warning",
             .color = esc.warn,
-        });
+        }) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
     }
 
-    fn err(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) !void {
-        self.had_errors = true;
-        const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
-        try self.logs.append(self.arena.allocator(), .{
+    fn Error(self: *Self, comptime fmt: []const u8, idx: ?u32, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.arena_alloc, fmt, args) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
+        self.log_records.append(self.arena_alloc, .{
             .msg = msg,
             .idx = idx,
             .severity = "error",
             .color = esc.err,
-        });
+        }) catch |err| switch (err) {
+            error.OutOfMemory => @panic(oom_msg),
+        };
     }
 
-    // FIXME: tabs break this
     fn log(self: Self, rec: LogRecord) !void {
         const line_end = std.mem.indexOfScalarPos(u8, self.source, self.token_start, '\n') orelse self.source.len;
         const color_end = @min(self.idx, line_end);
@@ -920,7 +939,11 @@ test "literalFloat" {
     const source =
         \\1e10 1e-5L 1. 1.e-2 3.14 .1f 0.1e-1L 0x1ffp10 0X0p-1 0x1.p0 0xf.p-1 0x0.123p-1 0xa.bp10l
     ;
-    var lexer = Lexer.init(std.testing.allocator, source, "test.c");
+    var lexer = Lexer.fromSlice(.{
+        .alloc = std.testing.allocator,
+        .filename = "test.c",
+        .source = source,
+    });
     defer lexer.deinit();
 
     try expectFloat(&lexer, 1e10);
