@@ -45,28 +45,21 @@ const lex = @import("lexer.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const alloc = gpa.allocator();
     defer _ = gpa.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
 
-    try args(alloc);
+    try args(gpa.allocator());
 
-    // var lexer = try lex.FileLexer.init(alloc, "/home/raul/Downloads/git/dwm/dwm.c");
-    var lexer = try lex.FileLexer.init(alloc, "/home/raul/dev/interpreter/src/example.c");
-    defer lexer.deinit();
+    var lexer = try lex.Lexer.fromFile(.{
+        .alloc = arena.allocator(),
+        .path = "src/example.c",
+        // .path = "/home/raul/Downloads/git/dwm/dwm.c",
+    });
 
     const stdout = std.io.getStdOut().writer();
     while (try lexer.next()) |token| {
         try stdout.print("{}\n", .{token.token});
-
-        // NOTE: Clean up the allocated string literals as we aren't yet using
-        // the tokens for any other compilation stages.
-        if (token.token == .literal_str) {
-            switch (token.token.literal_str) {
-                .utf8, .char => |str| alloc.free(str),
-                .utf16 => |str| alloc.free(str),
-                .utf32, .wchar => |str| alloc.free(str),
-            }
-        }
     }
     try stdout.writeAll("EoF\n");
 }

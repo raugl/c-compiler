@@ -48,6 +48,7 @@ pub const Token = union(enum) {
         endif,
     },
 
+    // BUG: This crashes if the printed unicode codepoint is invalid. It would also be nice to re-escape special chars
     pub fn format(
         self: Self,
         comptime fmt: []const u8,
@@ -75,6 +76,7 @@ pub const Token = union(enum) {
                 .char => |str| try writer.print("literal str: \"{s}\"", .{str}),
                 .utf8 => |str| try writer.print("literal str: u8\"{s}\"", .{str}),
                 .utf16 => |str| {
+                    // try writer.print("literal str: u\"{any}\"", .{str});
                     try writer.writeAll("literal str: u\"");
                     var it = std.unicode.Utf16LeIterator.init(str);
                     while (try it.nextCodepoint()) |codepoint| {

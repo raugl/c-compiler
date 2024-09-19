@@ -8,56 +8,6 @@ const wc = @import("wcwidth");
 const Token = tk.Token;
 const LocToken = tk.LocToken;
 
-/// A wrapper around `Lexer` that opens and manages a file for lexing
-pub const FileLexer = struct {
-    const Self = @This();
-    lexer: Lexer,
-    file: std.fs.File,
-    ptr: []align(std.mem.page_size) u8,
-
-    pub fn init(alloc: std.mem.Allocator, absolute_path: []const u8) !Self {
-        return withWritter(alloc, absolute_path, std.io.getStdErr().writer());
-    }
-
-    pub fn withWritter(
-        alloc: std.mem.Allocator,
-        absolute_path: []const u8,
-        writter: std.fs.File.Writer,
-    ) !Self {
-        // NOTE: I'm only using mmap so I don't need to load the whole file into memory
-        // manually. The kernel can inteligently manage loading/unloading of pages,
-        // and I still get a contiguous slice
-        // TODO: Crunching the numbers, a one million line file would only take
-        // about 40MB which honestly is nothing. I could easily load it whole into
-        // memory and not care about it. I could also do some char replacements
-        // that would make lexing a lot simpler, like tabs and newlines.
-        const file = try std.fs.openFileAbsolute(absolute_path, .{});
-        const md = try file.metadata();
-        const ptr = try std.posix.mmap(null, md.size(), std.posix.PROT.READ, .{ .TYPE = .SHARED }, file.handle, 0);
-        const filename = std.fs.path.basename(absolute_path);
-
-        return Self{
-            .file = file,
-            .ptr = ptr,
-            .lexer = Lexer.withWriter(alloc, ptr, filename, writter),
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.lexer.deinit();
-        std.posix.munmap(self.ptr);
-        self.file.close();
-    }
-
-    pub fn next(self: *Self) !?LocToken {
-        return self.lexer.next();
-    }
-
-    pub fn hadErrors(self: Self) bool {
-        return self.lexer.hadErrors();
-    }
-};
-
 pub const Lexer = struct {
     const Self = @This();
 
@@ -70,10 +20,11 @@ pub const Lexer = struct {
     had_errors: bool = false,
     first_on_line: bool = true, // TODO: for macros
 
+    arena_alloc: std.mem.Allocator = undefined,
+    log_records: std.ArrayListUnmanaged(LogRecord) = .{},
+
     writer: std.fs.File.Writer,
     alloc: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    logs: std.ArrayListUnmanaged(LogRecord),
 
     const LogRecord = struct {
         msg: []const u8,
@@ -82,30 +33,75 @@ pub const Lexer = struct {
         idx: ?u32,
     };
 
-    /// Deinitialize with `deinit`.
-    pub fn init(alloc: std.mem.Allocator, source: []const u8, filename: []const u8) Self {
-        return withWriter(alloc, source, filename, std.io.getStdErr().writer());
-    }
-
-    /// The writer used to print output to. `init` defaults to stderr
-    pub fn withWriter(
-        alloc: std.mem.Allocator,
+    const FromSliceArgs = struct {
         source: []const u8,
         filename: []const u8,
-        writer: std.fs.File.Writer,
-    ) Self {
+        alloc: std.mem.Allocator,
+        writer: std.fs.File.Writer = std.io.getStdErr().writer(),
+    };
+
+    const FromFileArgs = struct {
+        path: []const u8,
+        alloc: std.mem.Allocator,
+        writer: std.fs.File.Writer = std.io.getStdErr().writer(),
+    };
+
+    // TODO: Here the source isn't preproccessed (removing '\t', '\r').
+    pub fn fromSlice(args: FromSliceArgs) Self {
         return Self{
-            .source = source,
-            .filename = filename,
-            .writer = writer,
-            .alloc = alloc,
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .logs = std.ArrayListUnmanaged(LogRecord){},
+            .source = args.source,
+            .filename = args.filename,
+            .writer = args.writer,
+            .alloc = args.alloc,
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.arena.deinit();
+    pub fn fromFile(args: FromFileArgs) !Self {
+        const file = try std.fs.cwd().openFile(args.path, .{ .mode = .read_only });
+        defer file.close();
+
+        const stat = try file.stat();
+        const filename = std.fs.path.basename(args.path);
+        var source = try std.ArrayList(u8).initCapacity(args.alloc, stat.size);
+        errdefer source.deinit();
+
+        var buf_reader = std.io.bufferedReader(file.reader());
+        const reader = buf_reader.reader();
+        var line_start: usize = 0;
+        var prev_cr = false;
+
+        while (true) {
+            const ch = reader.readByte() catch |err_| switch (err_) {
+                error.EndOfStream => break,
+                else => return err_,
+            };
+            switch (ch) {
+                '\r' => {
+                    try source.append('\n');
+                    prev_cr = true;
+                    line_start = source.items.len;
+                },
+                '\n' => {
+                    if (!prev_cr) try source.append('\n');
+                    line_start = source.items.len;
+                },
+                '\t' => {
+                    const tab_size = 4;
+                    const num_cols = try wc.sliceWidth(source.items[line_start..]);
+                    if (num_cols == -1) return error.UndrawableChars;
+                    try source.appendNTimes(' ', tab_size - @as(usize, @intCast(num_cols)) % tab_size);
+                },
+                else => try source.append(ch),
+            }
+            prev_cr = false;
+        }
+
+        return fromSlice(.{
+            .alloc = args.alloc,
+            .filename = filename,
+            .source = try source.toOwnedSlice(),
+            .writer = args.writer,
+        });
     }
 
     pub fn hadErrors(self: Self) bool {
@@ -150,7 +146,6 @@ pub const Lexer = struct {
         };
     }
 
-    // FIXME: This doesn't support stand-alone '\r' as newlines
     fn consumeWhitespace(self: *Self) void {
         const control_code = std.ascii.control_code;
 
@@ -167,7 +162,8 @@ pub const Lexer = struct {
                     self.line_start = self.idx;
                     self.line_nr += 1;
                 },
-                ' ', '\t', '\r', control_code.vt, control_code.ff => self.idx += 1,
+                '\t', '\r' => unreachable,
+                ' ', control_code.vt, control_code.ff => self.idx += 1,
                 else => break,
             }
         }
@@ -276,7 +272,7 @@ pub const Lexer = struct {
     fn literalStrImpl(self: *Self, comptime T: type) ![]const T {
         const max_value = (1 << @bitSizeOf(T)) - 1;
         var result = std.ArrayList(T).init(self.alloc);
-        defer result.deinit();
+        errdefer result.deinit();
 
         while (self.idx < self.source.len) {
             const seq_start = self.idx;
@@ -416,7 +412,7 @@ pub const Lexer = struct {
 
     fn utf8Encode(cp: u32, out: *std.ArrayList(u8)) !void {
         const utf8SeqLen = std.unicode.utf8CodepointSequenceLength;
-        const length = try utf8SeqLen(@truncate(@min(cp, 0x10_ffff)));
+        const length = try utf8SeqLen(@intCast(cp));
         switch (length) {
             1 => try out.append(@intCast(cp)), // Can just do 0 + codepoint for initial range
             2 => {
@@ -440,7 +436,7 @@ pub const Lexer = struct {
 
     fn utf16Encode(cp: u32, out: *std.ArrayList(u16)) !void {
         const utf16SeqLen = std.unicode.utf16CodepointSequenceLength;
-        const length = try utf16SeqLen(@truncate(@min(cp, 0x10_ffff)));
+        const length = try utf16SeqLen(@intCast(cp));
         switch (length) {
             1 => try out.append(@intCast(cp)), // Can just do 0 + codepoint for initial range
             2 => {
@@ -977,7 +973,11 @@ test "consumeWhitespace" {
         \\  */
         \\
     ;
-    var lexer = Lexer.init(std.testing.allocator, source, "test.c");
+    var lexer = Lexer.fromSlice(.{
+        .alloc = std.testing.allocator,
+        .filename = "test.c",
+        .source = source,
+    });
     defer lexer.deinit();
 
     try expectEqualToken(1, 3, .{ .identifier = "foo" }, lexer.next());

@@ -9,9 +9,10 @@
 [x] Fix bug where identifiers can't start with keywords.
 [x] Implement complete char literal lexing.
 [x] Fix unicode rendering issues for log messages.
-[ ] Change mmap to manually coping the input file into memory. Replace tabs, newlines etc. with a standard set of chars.
+[x] Change mmap to manually coping the input file into memory. Replace tabs, newlines etc. with a standard set of chars.
+[x] Use an arena allocator for all the inter-stage data.
+[ ] Double check the operator and keyword lexers using cppreference.
 [ ] Implement preprocessor tokens.
 [ ] Implement the preprocessor.
 [ ] Write some more tests
 [ ] Make use of [this article](https://en.wikipedia.org/wiki/Recursive_descent_parser) to implement the parser.
-[ ] Use an arena allocator for all the inter-stage data and maybe also provide a gpa for internal stage use.
