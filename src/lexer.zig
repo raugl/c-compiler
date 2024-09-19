@@ -158,7 +158,7 @@ pub const Lexer = struct {
                     self.first_on_line = true;
                     self.line_start = self.idx;
                     self.line_nr += 1;
-                },
+                } else break,
                 '\n' => {
                     self.idx += 1;
                     self.first_on_line = true;
@@ -183,15 +183,15 @@ pub const Lexer = struct {
             while (self.match('_') or self.match(util.alphaNumeric)) {}
             const source = self.source[self.token_start..self.idx];
 
-            if (std.mem.eql(u8, source, "true")) {
-                return Token{ .literal_bool = true };
-            }
-            if (std.mem.eql(u8, source, "false")) {
-                return Token{ .literal_bool = false };
-            }
             if (kw.parseKeyword(source)) |res| {
-                return Token{ .keyword = res.kw };
+                return switch (res.kw) {
+                    .true => Token{ .literal_bool = true },
+                    .false => Token{ .literal_bool = false },
+                    else => Token{ .keyword = res.kw },
+                };
             }
+            // TODO: Identifiers should also contain unicode escapes and emoji:
+            // https://en.cppreference.com/w/c/language/identifier
             return Token{ .identifier = self.tokenStr() };
         }
         return null;

@@ -12,7 +12,7 @@
 [x] Change mmap to manually coping the input file into memory. Replace tabs, newlines etc. with a standard set of chars.
 [x] Use an arena allocator for all the inter-stage data.
 [x] Add local buffer for logging allocations.
-[ ] Double check the operator and keyword lexers using cppreference.
+[x] Double check the operator and keyword lexers using cppreference.
 [ ] Implement preprocessor tokens.
 [ ] Implement the preprocessor.
 [ ] Write some more tests
