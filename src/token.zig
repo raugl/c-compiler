@@ -1,6 +1,7 @@
 const std = @import("std");
 const kw = @import("keyword.zig");
 const op = @import("operator.zig");
+const Directive = @import("preproc.zig").Directive;
 
 /// Wrapper around `Token` that include source location information
 pub const LocToken = struct {
@@ -33,20 +34,7 @@ pub const Token = union(enum) {
     },
     keyword: kw.Keyword,
     operator: op.Operator,
-    preproc: enum {
-        include,
-        pragma,
-        define,
-        undef,
-        ifndef,
-        ifdef,
-        if_,
-        else_,
-        elif,
-        elifdef,
-        elifndef,
-        endif,
-    },
+    preproc: Directive,
 
     // BUG: This crashes if the printed unicode codepoint is invalid. It would also be nice to re-escape special chars
     pub fn format(
@@ -106,9 +94,9 @@ pub const Token = union(enum) {
             },
             .comment => |body| try writer.print("comment: {s}", .{body}),
             .identifier => |name| try writer.print("identifier: \"{s}\"", .{name}),
-            .preproc => |preproc| try writer.print("preproc.{s}", .{@tagName(preproc)}),
             .keyword => |keyword| try writer.print("keyword.{s}", .{kw.format(keyword)}),
             .operator => |operator| try writer.print("operator: \"{s}\"", .{op.format(operator)}),
+            .preproc => |preproc| try writer.print("preproc.{}", .{preproc}),
         }
     }
 };

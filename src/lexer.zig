@@ -1,12 +1,14 @@
 const std = @import("std");
+const wc = @import("wcwidth");
 const util = @import("util.zig");
 const kw = @import("keyword.zig");
 const op = @import("operator.zig");
 const tk = @import("token.zig");
-const wc = @import("wcwidth");
 
 const Token = tk.Token;
 const LocToken = tk.LocToken;
+
+const parseDirective = @import("preproc.zig").parseDirective;
 
 pub const Lexer = struct {
     const Self = @This();
@@ -18,7 +20,8 @@ pub const Lexer = struct {
     token_start: u32 = 0,
     line_nr: u16 = 1,
     had_errors: bool = false,
-    first_on_line: bool = true, // TODO: for macros
+    first_on_line: bool = true,
+    preproc_end: ?usize = null,
 
     arena_alloc: std.mem.Allocator = undefined,
     log_records: std.ArrayListUnmanaged(LogRecord) = .{},
@@ -109,6 +112,13 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Self) !?LocToken {
+        if (self.preproc_end) |end_idx| {
+            if (self.idx >= end_idx) {
+                self.preproc_end = null;
+                return try self.makeLocToken(Token{ .preproc = .end });
+            }
+        }
+
         var arena_buffer: [4096]u8 = undefined;
         var buf_alloc = std.heap.FixedBufferAllocator.init(&arena_buffer);
         var arena = std.heap.ArenaAllocator.init(buf_alloc.allocator());
@@ -119,16 +129,18 @@ pub const Lexer = struct {
         self.token_start = self.idx;
 
         // NOTE: The order matters
-        const token =
-            self.preproc() orelse
+        if (self.preproc() orelse
             self.comment() orelse
             try self.literalStr() orelse
             try self.literalChar() orelse
             try self.literalNumeric() orelse
             self.alphabetic() orelse
-            self.operator();
-
-        if (token == null) {
+            self.operator()) |token|
+        {
+            try self.flushLogs();
+            self.first_on_line = false;
+            return try self.makeLocToken(token);
+        } else {
             const source = self.source[self.idx..];
             if (std.mem.indexOfNone(u8, source, &std.ascii.whitespace)) |_| {
                 self.idx += @intCast(std.mem.indexOfScalar(u8, source, '\n') orelse source.len);
@@ -137,16 +149,6 @@ pub const Lexer = struct {
             try self.flushLogs();
             return null;
         }
-
-        try self.flushLogs();
-        self.first_on_line = false;
-
-        const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
-        return LocToken{
-            .line_nr = self.line_nr,
-            .col_nr = @as(u16, @intCast(col_nr)) + 1,
-            .token = token.?,
-        };
     }
 
     fn consumeWhitespace(self: *Self) void {
@@ -176,6 +178,15 @@ pub const Lexer = struct {
         var iter = std.mem.reverseIterator(self.log_records.items);
         while (iter.next()) |rec| try self.log(rec);
         self.log_records.clearAndFree(self.arena_alloc);
+    }
+
+    fn makeLocToken(self: Self, token: Token) !LocToken {
+        const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
+        return LocToken{
+            .line_nr = self.line_nr,
+            .col_nr = @as(u16, @intCast(col_nr)) + 1,
+            .token = token,
+        };
     }
 
     fn alphabetic(self: *Self) ?Token {
@@ -222,35 +233,29 @@ pub const Lexer = struct {
         return Token{ .operator = res.op };
     }
 
-    // TODO:
     fn preproc(self: *Self) ?Token {
         if (self.first_on_line and self.match('#')) {
             optional(self.match(util.whitespace));
 
-            if (self.match("include")) {
-                return Token{ .preproc = .include };
-            } else if (self.match("pragma")) {
-                return Token{ .preproc = .pragma };
-            } else if (self.match("define")) {
-                return Token{ .preproc = .define };
-            } else if (self.match("undef")) {
-                return Token{ .preproc = .undef };
-            } else if (self.match("ifndef")) {
-                return Token{ .preproc = .ifndef };
-            } else if (self.match("ifdef")) {
-                return Token{ .preproc = .ifdef };
-            } else if (self.match("if")) {
-                return Token{ .preproc = .if_ };
-            } else if (self.match("else")) {
-                return Token{ .preproc = .else_ };
-            } else if (self.match("elif")) {
-                return Token{ .preproc = .elif };
-            } else if (self.match("elifdef")) {
-                return Token{ .preproc = .elifdef };
-            } else if (self.match("elifndef")) {
-                return Token{ .preproc = .elifndef };
-            } else if (self.match("endif")) {
-                return Token{ .preproc = .endif };
+            const start_idx = self.idx;
+            while (self.match(util.alphabetic)) {}
+
+            self.preproc_end = blk: {
+                var i = self.token_start + 1;
+                while (i < self.source.len) : (i += 1) {
+                    if (self.source[i] == '\n' and self.source[i - 1] != '\\') {
+                        break :blk i;
+                    }
+                }
+                break :blk self.source.len;
+            };
+
+            const source = self.source[start_idx..self.idx];
+            if (parseDirective(source)) |directive| {
+                return Token{ .preproc = directive };
+            } else {
+                // The null directive (# followed by a line break) is allowed and has no effect.
+                return Token{ .preproc = .empty };
             }
         }
         return null;

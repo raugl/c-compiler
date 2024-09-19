@@ -13,7 +13,8 @@
 [x] Use an arena allocator for all the inter-stage data.
 [x] Add local buffer for logging allocations.
 [x] Double check the operator and keyword lexers using cppreference.
-[ ] Implement preprocessor tokens.
+[x] Implement preprocessor tokens.
 [ ] Implement the preprocessor.
+[ ] Add basic cli.
 [ ] Write some more tests
 [ ] Make use of [this article](https://en.wikipedia.org/wiki/Recursive_descent_parser) to implement the parser.
