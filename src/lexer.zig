@@ -5,6 +5,7 @@ const tk = @import("token.zig");
 
 const Token = tk.Token;
 const LocToken = tk.LocToken;
+const control_code = std.ascii.control_code;
 
 const parseKeyword = @import("keyword.zig").parseKeyword;
 const parseOperator = @import("operator.zig").parseOperator;
@@ -21,7 +22,7 @@ pub const Lexer = struct {
     line_nr: u16 = 1,
     had_errors: bool = false,
     first_on_line: bool = true,
-    preproc_end: ?usize = null,
+    preproc_end: ?u32 = null,
 
     arena_alloc: std.mem.Allocator = undefined,
     log_records: std.ArrayListUnmanaged(LogRecord) = .{},
@@ -115,7 +116,12 @@ pub const Lexer = struct {
         if (self.preproc_end) |end_idx| {
             if (self.idx >= end_idx) {
                 self.preproc_end = null;
-                return try self.makeLocToken(Token{ .preproc = .end });
+
+                return LocToken{
+                    .line_nr = self.line_nr + 1,
+                    .col_nr = 0,
+                    .token = Token{ .preproc = .end },
+                };
             }
         }
 
@@ -134,12 +140,19 @@ pub const Lexer = struct {
             try self.literalStr() orelse
             try self.literalChar() orelse
             try self.literalNumeric() orelse
-            self.alphabetic() orelse
+            self.keywordOrIdentifier() orelse
             self.operator()) |token|
         {
+            const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
             try self.flushLogs();
+            self.updateSoucePos();
             self.first_on_line = false;
-            return try self.makeLocToken(token);
+
+            return LocToken{
+                .line_nr = self.line_nr,
+                .col_nr = @as(u16, @intCast(col_nr)) + 1,
+                .token = token,
+            };
         } else {
             const source = self.source[self.idx..];
             if (std.mem.indexOfNone(u8, source, &std.ascii.whitespace)) |_| {
@@ -152,8 +165,18 @@ pub const Lexer = struct {
     }
 
     fn consumeWhitespace(self: *Self) void {
-        const control_code = std.ascii.control_code;
+        while (self.idx < self.source.len) {
+            self.consumeLineWhitespace();
+            if (self.source[self.idx] == '\n') {
+                self.idx += 1;
+                self.first_on_line = true;
+                self.line_start = self.idx;
+                self.line_nr += 1;
+            } else break;
+        }
+    }
 
+    fn consumeLineWhitespace(self: *Self) void {
         while (self.idx < self.source.len) {
             switch (self.source[self.idx]) {
                 '\\' => if (self.match("\\\n")) {
@@ -161,15 +184,27 @@ pub const Lexer = struct {
                     self.line_start = self.idx;
                     self.line_nr += 1;
                 } else break,
-                '\n' => {
-                    self.idx += 1;
-                    self.first_on_line = true;
-                    self.line_start = self.idx;
-                    self.line_nr += 1;
-                },
+                '\n' => break,
                 '\t', '\r' => unreachable,
                 ' ', control_code.vt, control_code.ff => self.idx += 1,
                 else => break,
+            }
+        }
+    }
+
+    fn lineEnd(self: Self) u32 {
+        for (self.idx..self.source.len) |i| {
+            if (self.source[i] == '\n' and self.source[i - 1] != '\\') {
+                return @intCast(i);
+            }
+        } else return @intCast(self.source.len);
+    }
+
+    fn updateSoucePos(self: *Self) void {
+        for (self.tokenStr(), self.token_start..) |ch, i| {
+            if (ch == '\n') {
+                self.line_nr += 1;
+                self.line_start = @intCast(i);
             }
         }
     }
@@ -180,29 +215,26 @@ pub const Lexer = struct {
         self.log_records.clearAndFree(self.arena_alloc);
     }
 
-    fn makeLocToken(self: Self, token: Token) !LocToken {
-        const col_nr = try wc.sliceWidth(self.source[self.line_start..self.token_start]);
-        return LocToken{
-            .line_nr = self.line_nr,
-            .col_nr = @as(u16, @intCast(col_nr)) + 1,
-            .token = token,
-        };
-    }
-
-    fn alphabetic(self: *Self) ?Token {
-        if (self.match('_') or self.match(util.alphabetic)) {
-            while (self.match('_') or self.match(util.alphaNumeric)) {}
-            const source = self.source[self.token_start..self.idx];
-
-            if (parseKeyword(source)) |keyword| {
+    fn keywordOrIdentifier(self: *Self) ?Token {
+        if (self.identifier()) |ident_token| {
+            if (parseKeyword(self.tokenStr())) |keyword| {
                 return switch (keyword) {
                     .true => Token{ .literal_bool = true },
                     .false => Token{ .literal_bool = false },
+                    // TODO: .nullptr => Token.literal_nullptr,
                     else => Token{ .keyword = keyword },
                 };
             }
-            // TODO: Identifiers should also contain unicode escapes and emoji:
-            // https://en.cppreference.com/w/c/language/identifier
+            return ident_token;
+        }
+        return null;
+    }
+
+    // TODO: Identifiers should also contain unicode escapes and emoji:
+    // https://en.cppreference.com/w/c/language/identifier
+    fn identifier(self: *Self) ?Token {
+        if (self.match('_') or self.match(util.alphabetic)) {
+            while (self.match('_') or self.match(util.alphaNumeric)) {}
             return Token{ .identifier = self.tokenStr() };
         }
         return null;
@@ -210,8 +242,7 @@ pub const Lexer = struct {
 
     fn comment(self: *Self) ?Token {
         if (self.match("//")) {
-            const source = self.source[self.idx..];
-            self.idx += @intCast(std.mem.indexOfScalar(u8, source, '\n') orelse source.len);
+            self.idx = self.lineEnd();
             return Token{ .comment = self.tokenStr() };
         }
         if (self.match("/*")) {
@@ -235,26 +266,21 @@ pub const Lexer = struct {
 
     fn preproc(self: *Self) ?Token {
         if (self.first_on_line and self.match('#')) {
-            optional(self.match(util.whitespace));
+            self.consumeLineWhitespace();
+            self.token_start = self.idx;
 
-            const start_idx = self.idx;
             while (self.match(util.alphabetic)) {}
+            self.preproc_end = self.lineEnd();
 
-            self.preproc_end = blk: {
-                var i = self.token_start + 1;
-                while (i < self.source.len) : (i += 1) {
-                    if (self.source[i] == '\n' and self.source[i - 1] != '\\') {
-                        break :blk i;
-                    }
-                }
-                break :blk self.source.len;
-            };
-
-            const source = self.source[start_idx..self.idx];
-            if (parseDirective(source)) |directive| {
+            // The null directive (# followed by a line break) is allowed and has no effect.
+            if (self.token_start == self.idx) {
+                return Token{ .preproc = .empty };
+            }
+            if (parseDirective(self.tokenStr())) |directive| {
                 return Token{ .preproc = directive };
             } else {
-                // The null directive (# followed by a line break) is allowed and has no effect.
+                self.Error("invalid preproccessing directive '#{s}'", self.token_start, .{self.tokenStr()});
+                self.idx = self.preproc_end.?;
                 return Token{ .preproc = .empty };
             }
         }
@@ -619,7 +645,7 @@ pub const Lexer = struct {
 
         if (has_extra) {
             const suffix = self.source[start_idx..self.idx];
-            self.Error("invalid suffix \"{s}\" for integer constant", start_idx, .{suffix});
+            self.Error("invalid suffix '{s}' for integer constant", start_idx, .{suffix});
         }
         return res;
     }
@@ -755,7 +781,7 @@ pub const Lexer = struct {
 
         if (has_extra) {
             const suffix = self.source[start_idx..self.idx];
-            self.Error("invalid suffix \"{s}\" for floating constant", start_idx, .{suffix});
+            self.Error("invalid suffix '{s}' for floating constant", start_idx, .{suffix});
         }
         return res;
     }
